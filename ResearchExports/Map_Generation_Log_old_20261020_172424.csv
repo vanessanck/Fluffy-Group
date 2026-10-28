@@ -1,0 +1,7 @@
+timestamp,base_seed,attempt,seed,result,map_radius,total_tiles,walkable_tiles,plateau_tiles,mountain_passes,pass_density,resource_tiles,player_start_nodes,enemy_start_nodes,start_gini,pass_carve_chance,resource_threshold,max_gini
+2026-10-20 17:15:12,0,1,0,rejected_unfair_gini,10,331,228,10,2,0.0088,39,4,2,0.1667,0.25,0.6,0.15
+2026-10-20 17:15:12,0,2,1,rejected_unfair_gini,10,331,242,11,6,0.0248,33,2,0,0.5000,0.25,0.6,0.15
+2026-10-20 17:15:12,0,3,2,accepted,10,331,247,21,7,0.0283,38,2,3,0.1000,0.25,0.6,0.15
+2026-10-20 17:17:52,0,1,0,rejected_unfair_gini,10,331,228,10,2,0.0088,39,4,2,0.1667,0.25,0.6,0.15
+2026-10-20 17:17:52,0,2,1,rejected_unfair_gini,10,331,242,11,6,0.0248,33,2,0,0.5000,0.25,0.6,0.15
+2026-10-20 17:17:52,0,3,2,accepted,10,331,247,21,7,0.0283,38,2,3,0.1000,0.25,0.6,0.15

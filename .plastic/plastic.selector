@@ -1,0 +1,4 @@
+repository "Fluffy Group 2026-10-12_15-20-24/Fluffy Group 2026-10-15_15-42-08@18968516702718@cloud"
+  path "/"
+    br "/main"
+    co "/main"
