@@ -71,14 +71,16 @@ public class BuildingType
 {
     public string name;
     public Cost cost;
-    public ResourceType needsResource = ResourceType.None;  // extraction buildings must sit on this resource tile
+    public ResourceType needsResource = ResourceType.None;
     public ResourceType produces = ResourceType.None;
-    public int amount;              // produced per turn
-    public int popCap;              // extra population cap
-    public int storage;             // extra storage cap for every resource
-    public int wheatUpkeep;         // wheat paid per turn
-    public int claimRadius;         // territory claimed around it (Outpost)
-    public bool borderOnly;         // must touch unclaimed land (Outpost)
+    public int amount;
+    public int popCap;
+    public int storage;
+    public int wheatUpkeep;
+    public int claimRadius;
+    public bool borderOnly;
+    public int needsTownLevel = 1;
+    public bool onePerSide;
     public PrimitiveType shape;
     public Vector3 size;
     public Color color;
@@ -95,20 +97,18 @@ public class Building
 // Everything one side owns besides its warriors
 public class Side
 {
-    public string name;             // "Player" or "Enemy"
+    public string name;
     public Cost stock;
     public int citizens;
     public int townLevel = 1;
     public bool trainedThisTurn, builtThisTurn;
-    public int starveTurns;         // turns in a row without enough wheat
-    public bool starving;           // -25% attack
-    public bool dehydrated;         // -1 move
+    public int starveTurns;
+    public bool starving;
+    public bool dehydrated;
 }
 
 public static class BuildingCatalog
 {
-    // Farm, Lumber Camp, Mine Quarry, Mana Sanctum, House, Warehouse and Outpost follow the spec.
-    // Well and Hunting Lodge are extra: the spec has Water and Meat tiles but no building to harvest them.
     public static BuildingType[] Create()
     {
         return new BuildingType[]
@@ -138,6 +138,11 @@ public static class BuildingCatalog
             new BuildingType { name = "Outpost", cost = new Cost { wood = 20, mineral = 10 }, wheatUpkeep = 1,
                 claimRadius = 1, borderOnly = true,
                 shape = PrimitiveType.Cylinder, size = new Vector3(0.25f, 0.35f, 0.25f), color = Color.white },
+            new BuildingType { name = "Barracks", cost = new Cost { wood = 20, mineral = 10 },
+                shape = PrimitiveType.Cube, size = new Vector3(0.45f, 0.2f, 0.3f), color = new Color(0.55f, 0.2f, 0.2f) },
+            new BuildingType { name = "Transmutation Lab", cost = new Cost { wood = 20, mineral = 20, mana = 5 },
+                needsTownLevel = 2, onePerSide = true,
+                shape = PrimitiveType.Sphere, size = new Vector3(0.35f, 0.35f, 0.35f), color = new Color(0.3f, 0.9f, 0.8f) },
         };
     }
 }
@@ -147,21 +152,31 @@ public static class BuildingCatalog
 public class UnitType
 {
     public string name;
-    public string letter;   // shown above the unit
-    public int tier = 1;    // 1 or 2, decides the upkeep
+    public string letter;
+    public int tier = 1;
     public int maxHP;
     public int attack;
     public int defense;
-    public int moves;       // move points per turn
-    public int range;       // 1 = melee, 2 or more = ranged
-    public Vector3 size;    // capsule size
+    public int moves;
+    public int range;
+    public Vector3 size;
     public Cost cost;
+
+    [Header("Promotion (Tier 1 only)")]
+    public string promotesTo = "";
+    public Cost promoteCost;
+
+    [Header("Special rules")]
+    public bool plainsCharge;
+    public bool forestWalker;
+    public int forestBonus;
+    public bool heavyArmor;
 }
 
 // One warrior on the map
 public class Unit
 {
-    public string owner;    // "Player" or "Enemy"
+    public string owner;
     public UnitType type;
     public HexTile tile;
     public int hp;
