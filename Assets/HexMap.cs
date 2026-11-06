@@ -59,7 +59,7 @@ public class HexMap : MonoBehaviour
     [Range(0f, 1f)] public float passCarveChance = 0.25f;
 
     [Header("Resource icons")]
-    public float resourceIconSize = 0.38f;   // world size of the picture shown on a resource tile
+    public float resourceIconSize = 1f;      // multiplier of the hex tile's flat-to-flat width
 
     [Header("SBPCG validation")]
     public int maxAttempts = 50;
@@ -648,15 +648,16 @@ public class HexMap : MonoBehaviour
     void BuildResourceMarker(HexTile t)
     {
         float top = t.obj.transform.localScale.y;
-        Vector3 spot = t.obj.transform.position + new Vector3(-0.42f, top, -0.22f);
+        Vector3 spot = t.obj.transform.position + Vector3.up * top;
+        float iconSize = hexSize * Mathf.Sqrt(3f) * 0.95f * resourceIconSize;
 
         Sprite icon = ResourceIcon(t.resource);
         if (icon != null)
         {
             GameObject g = new GameObject("Resource " + t.resource);
             g.transform.parent = transform;
-            g.transform.position = spot + Vector3.up * (resourceIconSize * 0.5f);
-            g.transform.localScale = Vector3.one * resourceIconSize;
+            g.transform.position = spot + Vector3.up * (iconSize * 0.5f);
+            g.transform.localScale = Vector3.one * iconSize;
 
             SpriteRenderer sr = g.AddComponent<SpriteRenderer>();
             sr.sprite = icon;
