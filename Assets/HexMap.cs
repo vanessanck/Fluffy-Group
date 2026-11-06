@@ -58,6 +58,9 @@ public class HexMap : MonoBehaviour
     [Header("Mountain pass carving")]
     [Range(0f, 1f)] public float passCarveChance = 0.25f;
 
+    [Header("Resource icons")]
+    public float resourceIconSize = 0.38f;   // world size of the picture shown on a resource tile
+
     [Header("SBPCG validation")]
     public int maxAttempts = 50;
     public float maxGini = 0.15f;
@@ -100,6 +103,7 @@ public class HexMap : MonoBehaviour
 
     void Start()
     {
+        iconCache = null;   // a fresh run picks up any art that changed since last time
         GameObject temp = GameObject.CreatePrimitive(PrimitiveType.Cube);
         baseMat = temp.GetComponent<Renderer>().sharedMaterial;
         Destroy(temp);
@@ -619,15 +623,53 @@ public class HexMap : MonoBehaviour
         }
     }
 
-    // A small colored ball shows which resource a tile holds
+    static Dictionary<ResourceType, Sprite> iconCache;
+
+    // Reads Assets/Resources/ResourceIcons/Wheat.png and friends. The file is loaded as a plain
+    // Texture2D and wrapped in a Sprite here at runtime, so the PNGs work straight out of the
+    // folder - nobody has to open the Inspector and switch Texture Type over to Sprite.
+    static Sprite ResourceIcon(ResourceType res)
+    {
+        if (iconCache == null) iconCache = new Dictionary<ResourceType, Sprite>();
+
+        Sprite cached;
+        if (iconCache.TryGetValue(res, out cached)) return cached;
+
+        Texture2D tex = Resources.Load<Texture2D>("ResourceIcons/" + res);
+        Sprite made = tex == null ? null
+            : Sprite.Create(tex, new Rect(0f, 0f, tex.width, tex.height), new Vector2(0.5f, 0.5f), tex.width);
+
+        iconCache[res] = made;
+        return made;
+    }
+
+    // A picture standing on the tile shows which resource it holds. If the picture is missing
+    // we drop back to the old coloured ball, so the map still runs with no art in the project.
     void BuildResourceMarker(HexTile t)
     {
+        float top = t.obj.transform.localScale.y;
+        Vector3 spot = t.obj.transform.position + new Vector3(-0.42f, top, -0.22f);
+
+        Sprite icon = ResourceIcon(t.resource);
+        if (icon != null)
+        {
+            GameObject g = new GameObject("Resource " + t.resource);
+            g.transform.parent = transform;
+            g.transform.position = spot + Vector3.up * (resourceIconSize * 0.5f);
+            g.transform.localScale = Vector3.one * resourceIconSize;
+
+            SpriteRenderer sr = g.AddComponent<SpriteRenderer>();
+            sr.sprite = icon;
+            g.AddComponent<Billboard>();
+            return;
+        }
+
         GameObject b = GameObject.CreatePrimitive(PrimitiveType.Sphere);
         Destroy(b.GetComponent<Collider>());
         b.name = "Resource " + t.resource;
         b.transform.parent = transform;
         b.transform.localScale = Vector3.one * 0.22f;
-        b.transform.position = t.obj.transform.position + new Vector3(-0.45f, t.obj.transform.localScale.y + 0.11f, -0.25f);
+        b.transform.position = spot + new Vector3(-0.03f, 0.11f, -0.03f);
         b.GetComponent<Renderer>().material.color = ResourceColor(t.resource);
     }
 
@@ -826,6 +868,7 @@ public class HexMap : MonoBehaviour
 }
 
 // Information about one hex tile
+[System.Serializable]
 public class HexTile
 {
     public int col, row;        // position in the rectangle

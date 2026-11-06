@@ -17,7 +17,7 @@ public class StrategyCamera : MonoBehaviour
 
         // Look down at the middle of the map
         transform.rotation = Quaternion.Euler(55f, 0f, 0f);
-        HexMap map = FindFirstObjectByType<HexMap>();
+        HexMap map = FindAnyObjectByType<HexMap>();
         if (map != null)
             transform.position = map.MapCenter() + new Vector3(0f, 18f, -12.6f);
     }

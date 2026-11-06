@@ -117,7 +117,7 @@ public class GameManager : MonoBehaviour
 
     void Start()
     {
-        map = FindFirstObjectByType<HexMap>();
+        map = FindAnyObjectByType<HexMap>();
         cam = Camera.main;
         buildingTypes = BuildingCatalog.Create();
     }
@@ -774,33 +774,44 @@ public class GameManager : MonoBehaviour
         return u.type.range + (u.type.range >= 2 && highGround ? 1 : 0);
     }
 
+    // Note: "defense / 2" is integer division, so DEF 2 and DEF 3 both take off 1.
+    // Left as it was on purpose - changing it shifts the whole balance and only moves
+    // which pair of defence values collide. Fix it together with a rebalance, not alone.
     int Damage(int attack, int defense)
     {
         return Mathf.Max(1, attack - defense / 2);
     }
 
+    // A melee clash is simultaneous: both blows are worked out from the state before anyone is
+    // hurt, then applied together. A defender that dies still lands its hit, so striking first is
+    // no longer a free kill. Ranged attacks from 2 or more tiles away still draw no reply.
     void AttackUnit(Unit a, Unit d)
     {
         int distance = Dist(a.tile, d.tile);
-        int dmg = Damage(AttackOf(a), DefenseOf(d, a));
-        d.hp -= dmg;
-        string log = UnitName(a) + " hit " + UnitName(d) + " for " + dmg;
 
-        if (d.hp <= 0)
-        {
-            Kill(d);
-            log += ". Destroyed!";
-        }
-        else if (distance == 1)
-        {
-            int back = Damage(AttackOf(d), DefenseOf(a, d));
-            a.hp -= back;
-            log += ", took " + back + " back";
-            if (a.hp <= 0) { Kill(a); log += " and was destroyed!"; }
-        }
+        int dmg = Damage(AttackOf(a), DefenseOf(d, a));
+        int back = distance == 1 ? Damage(AttackOf(d), DefenseOf(a, d)) : 0;
+
+        string aName = UnitName(a), dName = UnitName(d);
+
+        d.hp -= dmg;
+        a.hp -= back;
 
         a.hasAttacked = true;
         a.movesLeft = 0;
+
+        string log = aName + " hit " + dName + " for " + dmg;
+        if (back > 0) log += ", took " + back + " back";
+
+        bool defenderDied = d.hp <= 0;
+        bool attackerDied = a.hp <= 0;
+        if (defenderDied) Kill(d);
+        if (attackerDied) Kill(a);
+
+        if (defenderDied && attackerDied) log += ". Both were destroyed!";
+        else if (defenderDied) log += ". " + dName + " destroyed!";
+        else if (attackerDied) log += ". " + aName + " destroyed!";
+
         message = log;
         CheckGameOver();
     }
@@ -868,6 +879,114 @@ public class GameManager : MonoBehaviour
         RefreshHighlights();
     }
 
+    // ---------- Attack confirmation ----------
+
+    // Clicking an enemy only arms an attack. Nothing happens until the Attack button is pressed,
+    // so simply standing next to someone can never cost you a warrior by accident.
+    Unit pendingAttacker;
+    HexTile pendingTarget;
+
+    bool ConfirmVisible()
+    {
+        return pendingAttacker != null && pendingTarget != null
+               && units.Contains(pendingAttacker) && PlayerCanAct(Phase.Fight);
+    }
+
+    Rect ConfirmRect()
+    {
+        return new Rect(Screen.width / 2f - 175, Screen.height - 265, 350, 145);
+    }
+
+    void CancelPending()
+    {
+        pendingAttacker = null;
+        pendingTarget = null;
+    }
+
+    void ConfirmPending()
+    {
+        Unit a = pendingAttacker;
+        HexTile t = pendingTarget;
+        CancelPending();
+        if (a == null || t == null || !units.Contains(a)) return;
+
+        Attack(a, t);
+        selectedTile = t;
+        if (!gameOver && units.Contains(a)) SelectUnit(a);
+        else { selectedUnit = null; reachable.Clear(); targets.Clear(); RefreshHighlights(); }
+    }
+
+    // Exactly the numbers AttackUnit will use, worked out without changing anything
+    void PreviewAttack(Unit a, HexTile target, out int dmg, out int back)
+    {
+        Unit d = UnitAt(target);
+        if (d != null)
+        {
+            dmg = Damage(AttackOf(a), DefenseOf(d, a));
+            back = Dist(a.tile, target) == 1 ? Damage(AttackOf(d), DefenseOf(a, d)) : 0;
+        }
+        else
+        {
+            dmg = Damage(AttackOf(a), townDefense);
+            back = 0;
+        }
+    }
+
+    void DrawAttackConfirm()
+    {
+        Rect cr = ConfirmRect();
+        Unit a = pendingAttacker;
+        Unit d = UnitAt(pendingTarget);
+
+        int dmg, back;
+        PreviewAttack(a, pendingTarget, out dmg, out back);
+
+        GUI.Box(cr, "");
+
+        GUIStyle head = new GUIStyle(GUI.skin.label);
+        head.fontStyle = FontStyle.Bold;
+        head.fontSize = 15;
+        head.normal.textColor = new Color(1f, 0.85f, 0.3f);
+
+        float cy = cr.y + 8f;
+        GUI.Label(new Rect(cr.x + 12, cy, cr.width - 24, 22),
+                  d != null ? "Attack " + UnitName(d) + "?" : "Attack " + pendingTarget.town + "?", head);
+        cy += 25f;
+
+        if (d != null)
+        {
+            GUI.Label(new Rect(cr.x + 12, cy, cr.width - 24, 20),
+                      "You deal " + dmg + "   -   " + UnitName(d) + " " + d.hp + " to " + Mathf.Max(0, d.hp - dmg));
+            cy += 20f;
+            GUI.Label(new Rect(cr.x + 12, cy, cr.width - 24, 20), back > 0
+                      ? "You take " + back + " back   -   you " + a.hp + " to " + Mathf.Max(0, a.hp - back)
+                      : "No reply: you are shooting from range");
+            cy += 20f;
+
+            string warn = "";
+            bool youDie = a.hp - back <= 0;
+            bool theyDie = d.hp - dmg <= 0;
+            if (youDie && theyDie) warn = "Both warriors die";
+            else if (youDie) warn = "Your warrior dies";
+            else if (theyDie) warn = UnitName(d) + " dies";
+
+            if (warn != "")
+            {
+                GUIStyle ws = new GUIStyle(GUI.skin.label);
+                ws.fontStyle = FontStyle.Bold;
+                ws.normal.textColor = youDie ? new Color(1f, 0.45f, 0.40f) : new Color(0.45f, 1f, 0.55f);
+                GUI.Label(new Rect(cr.x + 12, cy, cr.width - 24, 20), warn, ws);
+            }
+        }
+        else
+        {
+            GUI.Label(new Rect(cr.x + 12, cy, cr.width - 24, 20), "You deal " + dmg + " to the town");
+        }
+
+        if (GUI.Button(new Rect(cr.x + 12, cr.yMax - 36, 158, 28), "Attack")) ConfirmPending();
+        if (GUI.Button(new Rect(cr.x + 180, cr.yMax - 36, 158, 28), "Cancel")) CancelPending();
+    }
+
     // ---------- Clicking ----------
 
     void HandleClick(Vector2 mousePos)
@@ -881,14 +1000,16 @@ public class GameManager : MonoBehaviour
         HexTile tile = clickedUnit != null ? clickedUnit.tile : map.GetTile(go);
         if (tile == null) return;
 
-        // Attack a yellow target
+        // Any click on the map drops an attack that was waiting for an answer
+        CancelPending();
+
+        // Clicking a yellow target only asks the question, it does not swing
         if (selectedUnit != null && targets.Contains(tile))
         {
-            Unit attacker = selectedUnit;
-            Attack(attacker, tile);
+            pendingAttacker = selectedUnit;
+            pendingTarget = tile;
             selectedTile = tile;
-            if (!gameOver && units.Contains(attacker)) SelectUnit(attacker);
-            else { selectedUnit = null; reachable.Clear(); targets.Clear(); RefreshHighlights(); }
+            RefreshHighlights();
             return;
         }
 
@@ -995,6 +1116,7 @@ public class GameManager : MonoBehaviour
         selectedUnit = null;
         reachable.Clear();
         targets.Clear();
+        CancelPending();
     }
 
     // Starts a phase. The computer sides act at the start of each phase, then you get your turn in it.
@@ -1270,6 +1392,7 @@ public class GameManager : MonoBehaviour
     {
         Vector2 p = new Vector2(mousePos.x, Screen.height - mousePos.y);
         if (infoRect.Contains(p) || ControlsRect().Contains(p) || ResourceRect().Contains(p)) return true;
+        if (ConfirmVisible() && ConfirmRect().Contains(p)) return true;
         if (BannerRect().Contains(p)) return true;
         if (TownPanelVisible() && TownRect().Contains(p)) return true;
         if (BarracksPanelVisible() && BarracksRect().Contains(p)) return true;
@@ -1494,6 +1617,8 @@ public class GameManager : MonoBehaviour
         GUI.Label(new Rect(help.x + 10, hy, helpW - 20, 20), "<b>Building:</b>  click your town, a Barracks or your tile", helpStyle); hy += 18;
         GUI.Label(new Rect(help.x + 10, hy, helpW - 20, 20), "<b>Move:</b>  click a warrior, then a lit tile", helpStyle); hy += 18;
         GUI.Label(new Rect(help.x + 10, hy, helpW - 20, 20), "<b>Fight:</b>  click a warrior, then a yellow target", helpStyle);
+
+        if (ConfirmVisible()) DrawAttackConfirm();
 
         DrawRoundBanner();
         DrawControls();
