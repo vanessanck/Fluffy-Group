@@ -58,10 +58,24 @@ public class HexMap : MonoBehaviour
     [Header("Mountain pass carving")]
     [Range(0f, 1f)] public float passCarveChance = 0.25f;
 
+    [Header("Random map (new map every Play)")]
+    [Tooltip("On: a new random seed every time you press Play or New Map. Off: always use the Seed above.")]
+    public bool randomizeEveryRun = true;
+    [Tooltip("On: each attempt also nudges the settings above by up to +/- these amounts (rolled from its own seed).")]
+    public bool randomizeParameters = true;
+    public float noiseScaleVariation = 0.03f;
+    public float waterLevelVariation = 0.03f;
+    public float mountainLevelVariation = 0.04f;
+    public float passCarveChanceVariation = 0.10f;
+
     [Header("SBPCG validation")]
     public int maxAttempts = 50;
     public float maxGini = 0.15f;
     public int fairnessRadius = 2;
+    [Tooltip("The biggest connected piece of walkable land must cover at least this share of ALL tiles.")]
+    [Range(0f, 1f)] public float minContinentShare = 0.35f;
+    [Tooltip("The two capitals must be at least this many tiles apart.")]
+    public int minStartDistance = 8;
 
     [Header("Towns")]
     public int townRadius = 2;
@@ -83,11 +97,28 @@ public class HexMap : MonoBehaviour
     public int playerStartNodes;
     public int enemyStartNodes;
     public float startGini;
+    public int continentTiles;      // size of the biggest connected walkable region
+    public float continentShare;    // continentTiles / totalTiles
+    public int startDistance;       // tiles between the two capitals
+
+    [Header("Settings used for this map (rolled per attempt)")]
+    public float usedNoiseScale;
+    public float usedWaterLevel;
+    public float usedHillsLevel;
+    public float usedMountainLevel;
+    public float usedPassCarveChance;
 
     public List<HexTile> tiles;
 
     Dictionary<Vector2Int, HexTile> byCoord = new Dictionary<Vector2Int, HexTile>();
     HexTile startPlayer, startEnemy;
+    HashSet<HexTile> continent = new HashSet<HexTile>();
+
+    // Seed kept across a scene reload, so Replay gives the same map. -1 = roll a new one.
+    public static int replaySeed = -1;
+
+    [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
+    static void ResetStatics() { replaySeed = -1; }
 
     Dictionary<GameObject, HexTile> lookup = new Dictionary<GameObject, HexTile>();
     Mesh hexMesh;
@@ -105,8 +136,14 @@ public class HexMap : MonoBehaviour
         Destroy(temp);
         hexMesh = BuildHexMesh();
 
+        // Pick the base seed: Replay reuses the last one, otherwise roll a new one (or keep the Inspector seed)
+        if (replaySeed >= 0) seed = replaySeed;
+        else if (randomizeEveryRun) seed = new System.Random().Next(1, 2000000);
+        replaySeed = -1;
+
         // SBPCG loop: generate, validate, and resample until a map passes
         bool accepted = false;
+        int fallbackAttempt = -1;   // first attempt whose capitals were at least connected
         for (int attempt = 0; attempt < maxAttempts; attempt++)
         {
             int s = AttemptSeed(attempt);
@@ -115,12 +152,15 @@ public class HexMap : MonoBehaviour
 
             ExportAttempt(attempt + 1, s, result);
             if (result == "accepted") { accepted = true; break; }
+            if (fallbackAttempt < 0 && (result == "rejected_unfair_gini" || result == "rejected_small_continent"))
+                fallbackAttempt = attempt;
         }
 
         if (!accepted)
         {
-            Debug.LogWarning("No map passed validation in " + maxAttempts + " attempts. Using the first attempt anyway.");
-            string result = GenerateAndValidate(AttemptSeed(0));
+            int use = fallbackAttempt >= 0 ? fallbackAttempt : 0;
+            Debug.LogWarning("No map passed validation in " + maxAttempts + " attempts. Using attempt " + (use + 1) + " anyway.");
+            string result = GenerateAndValidate(AttemptSeed(use));
             if (result == "rejected_no_land") { Debug.LogError("No land for the towns. Try another seed."); return; }
         }
 
@@ -134,6 +174,8 @@ public class HexMap : MonoBehaviour
                   ", resource tiles " + resourceTiles +
                   ", start nodes " + playerStartNodes + " vs " + enemyStartNodes +
                   ", start Gini " + startGini.ToString("F3") +
+                  ", continent " + continentTiles + " tiles (" + (continentShare * 100f).ToString("F0") + "%)" +
+                  ", capitals " + startDistance + " apart" +
                   (exportCsv ? "   CSV saved in: " + ExportFolder() : ""));
     }
 
@@ -150,17 +192,49 @@ public class HexMap : MonoBehaviour
         startGini = -1f;
         playerStartNodes = 0;
         enemyStartNodes = 0;
+        startDistance = 0;
 
         GenerateLayers(s);
         CountStats();
 
+        // BFS: the biggest connected piece of walkable land (the "continent")
+        FindLargestRegion();
+
+        // Capitals are only placed on the continent, so they can always reach each other
         if (!FindStarts()) return "rejected_no_land";
+        startDistance = Distance(startPlayer, startEnemy);
         playerStartNodes = StartNodes(startPlayer);
         enemyStartNodes = StartNodes(startEnemy);
         if (!IsConnected(startPlayer, startEnemy)) return "rejected_not_connected";
+        if (startDistance < minStartDistance) return "rejected_starts_too_close";
 
         startGini = StartGini(playerStartNodes, enemyStartNodes);
+        if (continentShare < minContinentShare) return "rejected_small_continent";
         return startGini > maxGini ? "rejected_unfair_gini" : "accepted";
+    }
+
+    // Rolls this attempt's noise and level settings from its own seed, so one seed always gives one map
+    void RollParameters(System.Random rng)
+    {
+        usedNoiseScale = noiseScale;
+        usedWaterLevel = waterLevel;
+        usedHillsLevel = hillsLevel;
+        usedMountainLevel = mountainLevel;
+        usedPassCarveChance = passCarveChance;
+        if (!randomizeParameters) return;
+
+        float hillsGap = mountainLevel - hillsLevel;   // keep the Hills band the same width
+        usedNoiseScale = Mathf.Max(0.01f, Roll(rng, noiseScale, noiseScaleVariation));
+        usedWaterLevel = Roll(rng, waterLevel, waterLevelVariation);
+        usedMountainLevel = Roll(rng, mountainLevel, mountainLevelVariation);
+        usedHillsLevel = Mathf.Max(usedWaterLevel + 0.05f, usedMountainLevel - hillsGap);
+        usedPassCarveChance = Mathf.Clamp01(Roll(rng, passCarveChance, passCarveChanceVariation));
+    }
+
+    // A random value between baseValue - variation and baseValue + variation
+    static float Roll(System.Random rng, float baseValue, float variation)
+    {
+        return baseValue + variation * ((float)rng.NextDouble() * 2f - 1f);
     }
 
     // ---------- Research export (CSV) ----------
@@ -173,7 +247,8 @@ public class HexMap : MonoBehaviour
     const string LogHeader =
         "timestamp,base_seed,attempt,seed,result,columns,rows,total_tiles,walkable_tiles,plateau_tiles," +
         "mountain_passes,pass_density,resource_tiles,player_start_nodes,enemy_start_nodes,start_gini," +
-        "pass_carve_chance,resource_threshold,max_gini";
+        "pass_carve_chance,resource_threshold,max_gini," +
+        "noise_scale,water_level,mountain_level,continent_tiles,continent_share,start_distance";
 
     // Adds one row per map attempt to Map_Generation_Log.csv
     void ExportAttempt(int attempt, int s, string result)
@@ -208,7 +283,9 @@ public class HexMap : MonoBehaviour
                 plateauTiles.ToString(inv), passCount.ToString(inv), passDensity.ToString("F4", inv),
                 resourceTiles.ToString(inv), playerStartNodes.ToString(inv), enemyStartNodes.ToString(inv),
                 startGini < 0f ? "" : startGini.ToString("F4", inv),
-                passCarveChance.ToString(inv), resourceThreshold.ToString(inv), maxGini.ToString(inv)
+                usedPassCarveChance.ToString("F4", inv), resourceThreshold.ToString(inv), maxGini.ToString(inv),
+                usedNoiseScale.ToString("F4", inv), usedWaterLevel.ToString("F4", inv), usedMountainLevel.ToString("F4", inv),
+                continentTiles.ToString(inv), continentShare.ToString("F4", inv), startDistance.ToString(inv)
             }));
         }
     }
@@ -218,6 +295,7 @@ public class HexMap : MonoBehaviour
     void GenerateLayers(int s)
     {
         System.Random rng = new System.Random(s);
+        RollParameters(rng);
         Vector2 oElev = RandomOffset(rng), oMoist = RandomOffset(rng), oTemp = RandomOffset(rng);
         Vector2 oRare = RandomOffset(rng), oRes = RandomOffset(rng);
 
@@ -236,7 +314,7 @@ public class HexMap : MonoBehaviour
                 Vector3 p = HexToWorld(q, r);
 
                 // Elevation with contrast and the radial island mask
-                float e = FBM(p.x, p.z, oElev, noiseScale, octaves);
+                float e = FBM(p.x, p.z, oElev, usedNoiseScale, octaves);
                 e = Mathf.Clamp01((e - 0.5f) * elevationContrast + 0.5f);
                 float dx = (p.x - center.x) / halfW;
                 float dz = (p.z - center.z) / halfH;
@@ -244,9 +322,9 @@ public class HexMap : MonoBehaviour
                 e *= Mathf.Exp(-falloffStrength * Mathf.Pow(d, falloffPower));
 
                 // Moisture, and temperature (warm in the middle rows, cold at the top and bottom)
-                float m = FBM(p.x, p.z, oMoist, noiseScale, octaves);
+                float m = FBM(p.x, p.z, oMoist, usedNoiseScale, octaves);
                 float latitude = 1f - Mathf.Abs((float)row / (rows - 1) - 0.5f) * 2f;
-                float t = Mathf.Lerp(FBM(p.x, p.z, oTemp, noiseScale, octaves), latitude, 0.35f);
+                float t = Mathf.Lerp(FBM(p.x, p.z, oTemp, usedNoiseScale, octaves), latitude, 0.35f);
 
                 // Rare (Mana leylines) and resource veins
                 float rare = Mathf.Clamp01((FBM(p.x, p.z, oRare, rareNoiseScale, 2) - 0.5f) * rareContrast + 0.5f);
@@ -288,9 +366,9 @@ public class HexMap : MonoBehaviour
     // Elevation slicing plus the Whittaker biome table
     TileType Classify(float e, float m, float t, float rare)
     {
-        if (e < waterLevel) return TileType.Ocean;
-        if (e >= mountainLevel) return TileType.Plateau;
-        if (e >= hillsLevel) return TileType.Hills;
+        if (e < usedWaterLevel) return TileType.Ocean;
+        if (e >= usedMountainLevel) return TileType.Plateau;
+        if (e >= usedHillsLevel) return TileType.Hills;
 
         if (t < 0.35f) return m >= 0.45f ? TileType.Taiga : TileType.Tundra;           // cold
         if (t > 0.65f) return m >= 0.35f ? TileType.Rainforest : TileType.Desert;       // hot
@@ -320,7 +398,7 @@ public class HexMap : MonoBehaviour
         foreach (HexTile t in tiles)
         {
             if (t.type != TileType.Plateau) continue;
-            if (LowlandNeighbors(t) >= 2 && rng.NextDouble() < passCarveChance) carve.Add(t);
+            if (LowlandNeighbors(t) >= 2 && rng.NextDouble() < usedPassCarveChance) carve.Add(t);
         }
         foreach (HexTile t in carve) t.type = TileType.MountainPass;
 
@@ -440,7 +518,37 @@ public class HexMap : MonoBehaviour
     }
     // ---------- Stage 5: SBPCG validation ----------
 
-    // Start tiles: the lowland tiles closest to the left and right quarter of the map (mirrored)
+    // Breadth-First Search over every walkable tile: keeps the biggest connected region.
+    // Uses CanStep, so cliffs count: a plateau only joins the region through a mountain pass.
+    void FindLargestRegion()
+    {
+        continent.Clear();
+        HashSet<HexTile> seen = new HashSet<HexTile>();
+
+        foreach (HexTile start in tiles)
+        {
+            if (!IsWalkable(start.type) || seen.Contains(start)) continue;
+
+            List<HexTile> region = new List<HexTile>();
+            Queue<HexTile> queue = new Queue<HexTile>();
+            queue.Enqueue(start);
+            seen.Add(start);
+            while (queue.Count > 0)
+            {
+                HexTile cur = queue.Dequeue();
+                region.Add(cur);
+                foreach (HexTile n in Neighbors(cur))
+                    if (!seen.Contains(n) && CanStep(cur, n)) { seen.Add(n); queue.Enqueue(n); }
+            }
+
+            if (region.Count > continent.Count) continent = new HashSet<HexTile>(region);
+        }
+
+        continentTiles = continent.Count;
+        continentShare = tiles.Count > 0 ? (float)continentTiles / tiles.Count : 0f;
+    }
+
+    // Start tiles: the continent's lowland tiles closest to the left and right quarter of the map (mirrored)
     bool FindStarts()
     {
         int midRow = rows / 2;
@@ -455,7 +563,7 @@ public class HexMap : MonoBehaviour
         int bestDist = int.MaxValue;
         foreach (HexTile t in tiles)
         {
-            if (!IsLowland(t.type)) continue;
+            if (!IsLowland(t.type) || !continent.Contains(t)) continue;
             int d = Distance(t.q, t.r, q, r);
             if (d < bestDist) { bestDist = d; best = t; }
         }
@@ -785,6 +893,14 @@ public class HexMap : MonoBehaviour
     public void SetHighlight(HexTile t, bool on)
     {
         t.rend.material.color = on ? Color.Lerp(t.baseColor, Color.white, 0.45f) : t.baseColor;
+    }
+
+    // Tints a tile to show you can build there. 'selected' makes it brighter, like SetHighlight.
+    public void SetBuildTint(HexTile t, Color tint, float amount, bool selected)
+    {
+        Color c = Color.Lerp(t.baseColor, tint, amount);
+        if (selected) c = Color.Lerp(c, Color.white, 0.45f);
+        t.rend.material.color = c;
     }
 
     Mesh BuildHexMesh()
