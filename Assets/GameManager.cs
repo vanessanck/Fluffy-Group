@@ -39,8 +39,13 @@ public class GameManager : MonoBehaviour
     public float autoPhaseSeconds = 1f;     // Play mode: seconds per phase (smaller = faster)
     public int maxRounds = 100;             // the match ends in a draw after this many rounds
 
-    // Tier 1 warriors are trained at a Barracks. Tier 2 warriors only come from promotion at a Transmutation Lab.
-    public UnitType[] unitTypes = new UnitType[]
+    // Tier 1 warriors are trained at the capital or a Barracks. Tier 2 warriors only come from promotion at a Transmutation Lab.
+    public UnitType[] unitTypes = DefaultUnitTypes();
+
+    // The real unit list with costs. Also used to repair an old list saved in the scene (see FixUnitTypes).
+    static UnitType[] DefaultUnitTypes()
+    {
+        return new UnitType[]
     {
         // ----- Tier 1 -----
         new UnitType { name = "Squire",  letter = "Sq", tier = 1, maxHP = 20, attack = 5, defense = 4,
@@ -70,6 +75,22 @@ public class GameManager : MonoBehaviour
         new UnitType { name = "Cavalry", letter = "C", tier = 2, maxHP = 24, attack = 8, defense = 4,
                        moves = 4, range = 1, size = new Vector3(0.45f, 0.30f, 0.45f), plainsCharge = true },
     };
+    }
+
+    // SampleScene.unity still holds an old 4-unit list (wheatCost/woodCost/mineralCost) from before the
+    // Cost class existed. Unity loads it with every cost = 0, so warriors were free and Knights trainable.
+    // If the list looks like that, use the real list from DefaultUnitTypes instead.
+    void FixUnitTypes()
+    {
+        bool stale = unitTypes == null || unitTypes.Length == 0 || !unitTypes.Any(t => t != null && t.tier == 2);
+        if (unitTypes != null)
+            foreach (UnitType t in unitTypes)
+                if (t == null || t.cost == null || (t.tier == 1 && t.cost.Text() == "(free)")) stale = true;
+        if (!stale) return;
+        Debug.LogWarning("GameManager: the unit list saved in the scene is old (no costs). Using the built-in list. " +
+                         "To clear it for good, right-click the GameManager component and choose Reset.");
+        unitTypes = DefaultUnitTypes();
+    }
 
     [Header("Towns and combat")]
     public int townMaxHP = 40;
@@ -119,6 +140,7 @@ public class GameManager : MonoBehaviour
     BuildingType[] buildingTypes;
     Dictionary<string, Side> sides = new Dictionary<string, Side>();
     Dictionary<HexTile, Building> buildings = new Dictionary<HexTile, Building>();
+    HashSet<HexTile> trainedHere = new HashSet<HexTile>();   // capitals and Barracks that already trained this turn
 
     List<Unit> units = new List<Unit>();
     Dictionary<GameObject, Unit> unitLookup = new Dictionary<GameObject, Unit>();
@@ -150,7 +172,7 @@ public class GameManager : MonoBehaviour
     bool gameOver = false;
     string resultText = "";
 
-    Rect infoRect = new Rect(10, 10, 340, 200);
+    Rect infoRect = new Rect(10, 10, 270, 175);   // top-left info box (compact)
     GUIStyle letterStyle, bigStyle, warnStyle, roundStyle, phaseOnStyle, phaseOffStyle, announceStyle;
 
     void Start()
@@ -158,6 +180,7 @@ public class GameManager : MonoBehaviour
         map = FindAnyObjectByType<HexMap>();
         cam = Camera.main;
         buildingTypes = BuildingCatalog.Create();
+        FixUnitTypes();
 
         // No camera moving behind the menu
         strategyCamera = FindFirstObjectByType<StrategyCamera>();
@@ -212,6 +235,9 @@ public class GameManager : MonoBehaviour
         click = Input.GetMouseButtonDown(0);
         mousePos = Input.mousePosition;
 #endif
+
+        // No camera zoom while the mouse wheel is scrolling a panel
+        if (strategyCamera != null) strategyCamera.blockZoom = OverUI(mousePos);
 
         if (click && !OverUI(mousePos)) HandleClick(mousePos);
 
@@ -479,11 +505,15 @@ public class GameManager : MonoBehaviour
         foreach (ResourceType r in Res.All) s.Add(r, -c.Get(r));
     }
 
-    // Training at a Barracks turns one citizen into a Tier 1 warrior
-    bool CanTrain(string owner, UnitType type)
+    // Training at the capital or a Barracks turns one citizen into a Tier 1 warrior.
+    // The capital and each Barracks can train 1 warrior per turn.
+    // trainAt = a specific capital/Barracks; null = any of this side's that hasn't trained yet.
+    bool CanTrain(string owner, UnitType type, HexTile trainAt = null)
     {
         Side s = sides[owner];
-        return type.tier == 1 && !s.trainedThisTurn && s.citizens > 0 && CanPay(owner, type.cost);
+        if (type.tier != 1 || s.citizens <= 0 || !CanPay(owner, type.cost)) return false;
+        if (trainAt != null) return !trainedHere.Contains(trainAt) && !BarracksBlocked(trainAt);
+        return TrainingTiles(owner).Any(t => !trainedHere.Contains(t));
     }
 
     bool HasBuilding(string owner, string typeName)
@@ -499,26 +529,41 @@ public class GameManager : MonoBehaviour
                                .Select(b => b.tile).OrderBy(t => t.q).ThenBy(t => t.r).ToList();
     }
 
-    bool TrainUnit(string owner, UnitType type, HexTile barracks = null)
+    // Places that can train: the capital first, then every Barracks
+    List<HexTile> TrainingTiles(string owner)
     {
-        if (!CanTrain(owner, type)) return false;
+        List<HexTile> list = new List<HexTile>();
+        HexTile town = FindTown(owner);
+        if (town != null) list.Add(town);
+        list.AddRange(BarracksTiles(owner));
+        return list;
+    }
 
-        // Use the given Barracks, or the first one with free space around it
+    bool TrainUnit(string owner, UnitType type, HexTile trainAt = null)
+    {
+        if (!CanTrain(owner, type, trainAt)) return false;
+
+        // Use the given capital or Barracks, or the first one that hasn't trained yet and has free space around it
         List<HexTile> spots = new List<HexTile>();
-        List<HexTile> options = barracks != null ? new List<HexTile> { barracks } : BarracksTiles(owner);
+        HexTile usedTile = null;
+        List<HexTile> options = trainAt != null ? new List<HexTile> { trainAt }
+                                                : TrainingTiles(owner).Where(t => !trainedHere.Contains(t)).ToList();
         foreach (HexTile b in options)
         {
-            spots = FreeSpotsNear(b, owner, 2);
-            if (spots.Count > 0) break;
+            spots = TrainSpots(b, owner);
+            if (spots.Count > 0) { usedTile = b; break; }
         }
         if (options.Count == 0)
         {
-            if (owner == "Player") message = "Build a Barracks first.";
+            if (owner == "Player") message = "You have no capital or Barracks to train at.";
             return false;
         }
         if (spots.Count == 0)
         {
-            if (owner == "Player") message = "No free tile next to your Barracks.";
+            if (owner == "Player")
+                message = trainAt == null ? "No free place to train right now."
+                        : trainAt.town != "" ? "No free tile next to your capital."
+                        : "Move the unit off the Barracks first.";
             return false;
         }
 
@@ -527,10 +572,26 @@ public class GameManager : MonoBehaviour
         Unit u = CreateUnit(owner, type, spots[0]);
         u.movesLeft = 0;       // new warriors can act next turn
         u.hasAttacked = true;
-        sides[owner].trainedThisTurn = true;
+        trainedHere.Add(usedTile);
+        sides[owner].trainedThisTurn = true;   // "trained at least once this turn" (kept for info only)
 
-        message = (owner == "Player" ? "You trained a " : "The enemy trained a ") + type.name;
+        string where = usedTile.town != "" ? " at the capital" : " at a Barracks";
+        message = (owner == "Player" ? "You trained a " : "The enemy trained a ") + type.name + where + ".";
         return true;
+    }
+
+    // Where a new warrior appears.
+    // Barracks: only ON the Barracks tile. If a warrior stands there, the Barracks can't train until it moves off.
+    // Capital: the nearest free tile around it (up to 2 steps).
+    List<HexTile> TrainSpots(HexTile trainAt, string owner)
+    {
+        if (trainAt.town != "") return FreeSpotsNear(trainAt, owner, 2);
+        return CanEnter(trainAt, owner) ? new List<HexTile> { trainAt } : new List<HexTile>();
+    }
+
+    bool BarracksBlocked(HexTile t)
+    {
+        return t != null && t.town == "" && UnitAt(t) != null;
     }
 
     // ---------- Promotion (Tier 1 to Tier 2) ----------
@@ -692,14 +753,16 @@ public class GameManager : MonoBehaviour
         if (net.water <= 0 && BuildAnywhere(owner, "Well")) return;
         if (PopUsed(owner) >= PopCap(owner) - 1 && BuildAnywhere(owner, "House")) return;
 
-        // An army needs a Barracks, and promotions need a Transmutation Lab
-        if (!HasBuilding(owner, "Barracks") && BuildAnywhere(owner, "Barracks")) return;
+        // The capital trains warriors, so no Barracks is needed first. Promotions need a Transmutation Lab.
         if (BuildAnywhere(owner, "Transmutation Lab")) return;
 
         // Then grow the economy
         foreach (string name in new string[] { "Farm", "Lumber Camp", "Mine Quarry", "Well",
                                                "Mana Sanctum", "Hunting Lodge" })
             if (BuildAnywhere(owner, name)) return;
+
+        // One Barracks gives a second place to train when the capital is crowded
+        if (!HasBuilding(owner, "Barracks") && BuildAnywhere(owner, "Barracks")) return;
 
         // Nothing left to harvest inside the territory: expand
         if (Random.value < 0.5f) BuildAnywhere(owner, "Outpost");
@@ -713,6 +776,18 @@ public class GameManager : MonoBehaviour
         {
             UnitType type = unitTypes[(start + i) % unitTypes.Length];
             if (type.tier == 1 && TrainUnit(owner, type)) return;
+        }
+    }
+
+    // The capital and every Barracks each try to train one warrior per turn
+    void AiTrainAll(string owner)
+    {
+        int tries = TrainingTiles(owner).Count;
+        for (int i = 0; i < tries; i++)
+        {
+            int before = UnitCount(owner);
+            AiTrain(owner);
+            if (UnitCount(owner) == before) break;   // nothing more could be trained
         }
     }
 
@@ -1198,9 +1273,59 @@ public class GameManager : MonoBehaviour
         buildFocus = i - 1;
     }
 
+    // Wide enough for the longest name + cost ("Transmutation Lab (20 Wood, 20 Mineral, 5 Mana)").
+    // On a narrow screen it shrinks to fit beside the buttons, and the text wraps onto a second line.
+    // When a building is picked, the bar grows to list its build conditions (2 per row).
     Rect BuildSpotsRect()
     {
-        return new Rect(10, Screen.height - 170, 380, 50);
+        float w = Mathf.Max(380, Mathf.Min(620, Screen.width - ControlsRect().width - 30));
+        int rows = buildFocus >= 0 && buildingTypes != null
+                 ? (BuildConditionCount(buildingTypes[buildFocus]) + 1) / 2 : 0;
+        float h = 68 + rows * 17 + (rows > 0 ? 4 : 0);
+        return new Rect(10, Screen.height - 122 - h, w, h);
+    }
+
+    // How many lines BuildConditions makes (cheap, used for the bar size)
+    int BuildConditionCount(BuildingType type)
+    {
+        return 4 + (type.borderOnly ? 1 : 0) + (type.needsTownLevel > 1 ? 1 : 0) + (type.onePerSide ? 1 : 0);
+    }
+
+    // Every rule a building must pass (same rules as FitsTile / CanBuild), and whether you meet it right now.
+    // The tile rules are checked one after another on your own tiles, so the first "NO" is the one blocking you.
+    List<KeyValuePair<string, bool>> BuildConditions(BuildingType type)
+    {
+        List<KeyValuePair<string, bool>> list = new List<KeyValuePair<string, bool>>();
+        Side me = sides["Player"];
+
+        IEnumerable<HexTile> tiles = map.tiles.Where(t => t.owner == "Player" && t.town == "" && !buildings.ContainsKey(t)
+                                                        && map.IsWalkable(t.type));
+        list.Add(new KeyValuePair<string, bool>("Empty land tile in your territory", tiles.Any()));
+
+        if (type.needsResource != ResourceType.None)
+        {
+            tiles = tiles.Where(t => t.resource == type.needsResource);
+            list.Add(new KeyValuePair<string, bool>("On a " + type.needsResource + " resource tile", tiles.Any()));
+        }
+        else
+        {
+            tiles = tiles.Where(t => t.type != TileType.Coast);
+            list.Add(new KeyValuePair<string, bool>("Not on Coast", tiles.Any()));
+        }
+        if (type.borderOnly)
+        {
+            tiles = tiles.Where(t => map.Neighbors(t).Any(n => n.owner == ""));
+            list.Add(new KeyValuePair<string, bool>("Touching unclaimed land (border)", tiles.Any()));
+        }
+        if (type.needsTownLevel > 1)
+            list.Add(new KeyValuePair<string, bool>("Town Level " + type.needsTownLevel + " (yours: " + me.townLevel + ")",
+                                                    me.townLevel >= type.needsTownLevel));
+        if (type.onePerSide)
+            list.Add(new KeyValuePair<string, bool>("Only 1 allowed (you have " + (HasBuilding("Player", type.name) ? "1" : "0") + ")",
+                                                    !HasBuilding("Player", type.name)));
+        list.Add(new KeyValuePair<string, bool>("Nothing built yet this turn", !me.builtThisTurn));
+        list.Add(new KeyValuePair<string, bool>("Can pay " + type.cost.Text(), CanPay("Player", type.cost)));
+        return list;
     }
 
     void DrawBuildSpotsBar()
@@ -1208,18 +1333,40 @@ public class GameManager : MonoBehaviour
         if (!showBuildSpots || !PlayerCanAct(Phase.Building)) return;
         Rect r = BuildSpotsRect();
         GUI.Box(r, "");
-        if (GUI.Button(new Rect(r.x + 5, r.y + 5, 30, 22), "<")) CycleBuildFocus(-1);
-        if (GUI.Button(new Rect(r.xMax - 35, r.y + 5, 30, 22), ">")) CycleBuildFocus(1);
+        if (GUI.Button(new Rect(r.x + 5, r.y + 6, 30, 24), "<")) CycleBuildFocus(-1);
+        if (GUI.Button(new Rect(r.xMax - 35, r.y + 6, 30, 24), ">")) CycleBuildFocus(1);
 
         string label = buildFocus < 0
             ? "Build spots: any building"
             : "Build spots: " + buildingTypes[buildFocus].name + "  " + buildingTypes[buildFocus].cost.Text();
-        GUI.Label(new Rect(r.x + 42, r.y + 6, r.width - 84, 22), label);
+        GUIStyle wrap = new GUIStyle(GUI.skin.label);
+        wrap.wordWrap = true;
+        wrap.fontSize = 12;
+        wrap.alignment = TextAnchor.MiddleCenter;
+        GUI.Label(new Rect(r.x + 40, r.y + 2, r.width - 80, 30), label, wrap);
 
         string hint = buildSpots.Count == 0 ? "No spot fits right now"
                     : buildFocus >= 0 ? "Click a green tile to build it. Yellow = can't pay / built this turn"
                     : "Green = build now, yellow = can't pay / built this turn";
-        GUI.Label(new Rect(r.x + 10, r.y + 27, r.width - 20, 22), hint);
+        if (buildFocus < 0) hint += ".  Press < > to pick a building and see what it needs.";
+        GUIStyle hintStyle = new GUIStyle(wrap);
+        hintStyle.alignment = TextAnchor.MiddleLeft;
+        hintStyle.richText = true;
+
+        // Conditions for the picked building: OK (green) = met, NO (red) = this is what stops you
+        float cy = r.y + 32;
+        if (buildFocus >= 0)
+        {
+            List<KeyValuePair<string, bool>> conds = BuildConditions(buildingTypes[buildFocus]);
+            float colW = (r.width - 20) / 2f;
+            for (int i = 0; i < conds.Count; i++)
+            {
+                string mark = conds[i].Value ? "<color=#66ff66><b>OK</b></color>  " : "<color=#ff6666><b>NO</b></color>  ";
+                GUI.Label(new Rect(r.x + 10 + (i % 2) * colW, cy + (i / 2) * 17, colW, 18), mark + conds[i].Key, hintStyle);
+            }
+            cy += ((conds.Count + 1) / 2) * 17 + 4;
+        }
+        GUI.Label(new Rect(r.x + 10, cy, r.width - 20, 34), hint, hintStyle);
     }
 
     // ---------- Turns ----------
@@ -1290,6 +1437,7 @@ public class GameManager : MonoBehaviour
                 s.trainedThisTurn = false;
                 s.builtThisTurn = false;
             }
+            trainedHere.Clear();
             foreach (Unit u in units)
             {
                 u.movesLeft = MovesFor(u);
@@ -1301,7 +1449,7 @@ public class GameManager : MonoBehaviour
             foreach (string owner in ComputerSides())
             {
                 if (gameOver) break;
-                if (p == Phase.Building) { AiBuild(owner); AiTrain(owner); AiPromote(owner); }
+                if (p == Phase.Building) { AiBuild(owner); AiTrainAll(owner); AiPromote(owner); }
                 else if (p == Phase.Move) AiMoveAll(owner);
                 else AiAttackAll(owner);
             }
@@ -1480,10 +1628,12 @@ public class GameManager : MonoBehaviour
 
     // ---------- Screen ----------
 
-    // Bottom right: Play / Stop / Replay / New Map and Next Phase
+    // Bottom right: Play / Stop / Replay / New Map / Menu and Next Phase.
+    // Wide enough that every button shows its whole word (about 86 px per button).
     Rect ControlsRect()
     {
-        return new Rect(Screen.width - 340, Screen.height - 115, 330, 105);
+        float w = Mathf.Min(470, Screen.width - 20);
+        return new Rect(Screen.width - w - 10, Screen.height - 115, w, 105);
     }
 
     // Top middle: round number and the 4 phases
@@ -1492,9 +1642,10 @@ public class GameManager : MonoBehaviour
         return new Rect(Screen.width / 2f - 200, 10, 400, 82);
     }
 
+    // Top right: a compact resource box
     Rect ResourceRect()
     {
-        return new Rect(Screen.width - 260, 10, 250, 215);
+        return new Rect(Screen.width - 210, 10, 200, 170);
     }
 
     bool TownPanelVisible()
@@ -1502,9 +1653,42 @@ public class GameManager : MonoBehaviour
         return PlayerCanAct(Phase.Building) && selectedTile != null && selectedTile.town != "" && selectedTile.owner == "Player";
     }
 
+    // Height of everything inside the town panel (Upgrade button, Train label, Train buttons)
+    float TownContentHeight()
+    {
+        return 60 + Tier1Types().Count * 35;
+    }
+
+    // Left-side panels (town, Barracks, Build) stop above the Build spots bar (or the help box).
+    // If their buttons don't fit, they scroll with the mouse wheel or the scrollbar.
+    Rect PanelRect(float contentHeight)
+    {
+        float bottom = showBuildSpots ? BuildSpotsRect().y : Screen.height - 115;
+        float top = infoRect.yMax + 10;
+        float maxH = Mathf.Max(90, bottom - 10 - top);
+        return new Rect(10, top, 380, Mathf.Min(24 + contentHeight + 6, maxH));
+    }
+
+    // Starts the scroll area under a panel's title. Returns the button width (narrower when a scrollbar shows).
+    // Draw the buttons from x = 6, y = 0, then call GUI.EndScrollView().
+    float BeginPanelScroll(Rect panel, ref Vector2 scroll, float contentHeight)
+    {
+        Rect view = new Rect(panel.x + 4, panel.y + 24, panel.width - 8, panel.height - 28);
+        bool needsScroll = contentHeight > view.height;
+        scroll = GUI.BeginScrollView(view, scroll, new Rect(0, 0, view.width - (needsScroll ? 20 : 0), contentHeight));
+        return needsScroll ? 340 : 360;
+    }
+
     Rect TownRect()
     {
-        return new Rect(10, 220, 380, 65);
+        return PanelRect(TownContentHeight());
+    }
+    Vector2 townScroll = Vector2.zero, barracksScroll = Vector2.zero, buildScroll = Vector2.zero;
+
+    // Each row is a 30 px button with a 5 px gap
+    float ButtonsHeight(int count)
+    {
+        return Mathf.Max(0, count * 35 - 5);
     }
 
     // Clicking your own Barracks opens the training panel
@@ -1522,7 +1706,7 @@ public class GameManager : MonoBehaviour
 
     Rect BarracksRect()
     {
-        return new Rect(10, 220, 380, 30 + Tier1Types().Count * 35);
+        return PanelRect(ButtonsHeight(Tier1Types().Count));
     }
 
     // Promote panel for your selected Tier 1 warrior
@@ -1534,7 +1718,7 @@ public class GameManager : MonoBehaviour
 
     Rect PromoteRect()
     {
-        return new Rect(Screen.width - 260, 235, 250, 75);
+        return new Rect(Screen.width - 260, ResourceRect().yMax + 10, 250, 75);
     }
 
     // Why the promote button is grey
@@ -1559,7 +1743,7 @@ public class GameManager : MonoBehaviour
 
     Rect BuildRect(int count)
     {
-        return new Rect(10, 220, 380, 30 + count * 35);
+        return PanelRect(ButtonsHeight(count));
     }
 
     bool OverUI(Vector2 mousePos)
@@ -1647,44 +1831,48 @@ public class GameManager : MonoBehaviour
 
         // Info box
         GUI.Box(infoRect, "");
-        float y = 15f;
-        GUI.Label(new Rect(20, y, 320, 25), "Round " + turn + "   " + PhaseName(phase)); y += 20f;
+        GUIStyle infoStyle = new GUIStyle(GUI.skin.label);
+        infoStyle.fontSize = 11;
+        GUIStyle infoNoteStyle = new GUIStyle(infoStyle);
+        infoNoteStyle.wordWrap = true;       // terrain notes can be long: allow 2 lines
+        float y = 12f;
+        GUI.Label(new Rect(18, y, 250, 18), "Round " + turn + "   " + PhaseName(phase), infoStyle); y += 16f;
 
         if (selectedTile == null)
         {
-            GUI.Label(new Rect(20, y, 320, 25), "Click a tile, a warrior, or your town");
+            GUI.Label(new Rect(18, y, 250, 18), "Click a tile, a warrior, or your town", infoStyle);
         }
         else
         {
-            GUI.Label(new Rect(20, y, 320, 25),
-                HexMap.TypeLabel(selectedTile.type) + "   Owner: " + OwnerName(selectedTile.owner)); y += 20f;
+            GUI.Label(new Rect(18, y, 250, 18),
+                HexMap.TypeLabel(selectedTile.type) + "   Owner: " + OwnerName(selectedTile.owner), infoStyle); y += 16f;
             if (selectedTile.resource != ResourceType.None)
             {
-                GUI.Label(new Rect(20, y, 320, 25), "Resource tile: " + selectedTile.resource); y += 20f;
+                GUI.Label(new Rect(18, y, 250, 18), "Resource tile: " + selectedTile.resource, infoStyle); y += 16f;
             }
             if (selectedTile.town != "" && townHP.ContainsKey(selectedTile))
             {
                 int level = sides[selectedTile.owner].townLevel;
-                GUI.Label(new Rect(20, y, 320, 25), selectedTile.town + " (Level " + level + ")   HP " +
-                          townHP[selectedTile] + "/" + townMax[selectedTile]); y += 20f;
+                GUI.Label(new Rect(18, y, 250, 18), selectedTile.town + " (Level " + level + ")   HP " +
+                          townHP[selectedTile] + "/" + townMax[selectedTile], infoStyle); y += 16f;
             }
             Building b;
             if (buildings.TryGetValue(selectedTile, out b))
             {
                 string what = b.type.produces != ResourceType.None ? "  (+" + b.type.amount + " " + b.type.produces + ")" : "";
-                GUI.Label(new Rect(20, y, 320, 25), "Building: " + b.type.name + what); y += 20f;
+                GUI.Label(new Rect(18, y, 250, 18), "Building: " + b.type.name + what, infoStyle); y += 16f;
             }
 
             Unit u = UnitAt(selectedTile);
             if (u != null)
             {
-                GUI.Label(new Rect(20, y, 320, 25), UnitName(u) + "   HP " + u.hp + "/" + u.type.maxHP); y += 20f;
-                GUI.Label(new Rect(20, y, 320, 25),
-                    "ATK " + AttackOf(u) + "   DEF " + DefenseOf(u, null) + "   Range " + RangeOf(u)); y += 20f;
-                GUI.Label(new Rect(20, y, 320, 25),
-                    "Moves " + u.movesLeft + "/" + MovesFor(u) + (u.hasAttacked ? "   (done)" : "")); y += 20f;
+                GUI.Label(new Rect(18, y, 250, 18), UnitName(u) + "   HP " + u.hp + "/" + u.type.maxHP, infoStyle); y += 16f;
+                GUI.Label(new Rect(18, y, 250, 18),
+                    "ATK " + AttackOf(u) + "   DEF " + DefenseOf(u, null) + "   Range " + RangeOf(u), infoStyle); y += 16f;
+                GUI.Label(new Rect(18, y, 250, 18),
+                    "Moves " + u.movesLeft + "/" + MovesFor(u) + (u.hasAttacked ? "   (done)" : ""), infoStyle); y += 16f;
                 string note = TerrainNote(u);
-                if (note != "") GUI.Label(new Rect(20, y, 320, 25), note);
+                if (note != "") GUI.Label(new Rect(18, y, 250, 30), note, infoNoteStyle);
             }
         }
 
@@ -1692,37 +1880,62 @@ public class GameManager : MonoBehaviour
         Side me = sides["Player"];
         Cost net = NetIncome("Player");
         Rect r = ResourceRect();
-        GUI.Box(r, "Your resources (storage " + StorageCap("Player") + ")");
-        float ry = r.y + 22;
+        GUI.Box(r, "Resources (max " + StorageCap("Player") + ")");
+        GUIStyle hudStyle = new GUIStyle(GUI.skin.label);
+        hudStyle.fontSize = 11;
+        GUIStyle hudWarn = new GUIStyle(warnStyle);
+        hudWarn.fontSize = 11;
+        float lw = r.width - 16;
+        float ry = r.y + 20;
         foreach (ResourceType res in Res.All)
         {
-            GUI.Label(new Rect(r.x + 10, ry, 230, 22), res + ":  " + me.stock.Get(res) + "   (" + Signed(net.Get(res)) + ")");
-            ry += 20;
+            GUI.Label(new Rect(r.x + 8, ry, lw, 18), res + ":  " + me.stock.Get(res) + "   (" + Signed(net.Get(res)) + ")", hudStyle);
+            ry += 16;
         }
-        GUI.Label(new Rect(r.x + 10, ry, 230, 22),
-            "Pop: " + me.citizens + " citizens + " + UnitCount("Player") + " warriors / " + PopCap("Player"));
-        ry += 20;
-        if (me.starving) { GUI.Label(new Rect(r.x + 10, ry, 230, 22), "STARVING: -25% attack", warnStyle); ry += 20; }
-        if (me.dehydrated) { GUI.Label(new Rect(r.x + 10, ry, 230, 22), "DEHYDRATED: -1 move", warnStyle); }
+        GUI.Label(new Rect(r.x + 8, ry, lw, 18),
+            "Pop: " + me.citizens + " people + " + UnitCount("Player") + " units / " + PopCap("Player"), hudStyle);
+        ry += 16;
+        if (me.starving) { GUI.Label(new Rect(r.x + 8, ry, lw, 18), "STARVING: -25% attack", hudWarn); ry += 16; }
+        if (me.dehydrated) { GUI.Label(new Rect(r.x + 8, ry, lw, 18), "DEHYDRATED: -1 move", hudWarn); }
 
         // Town panel: upgrade
         if (TownPanelVisible())
         {
             Rect tr = TownRect();
             GUI.Box(tr, "Your town (Level " + me.townLevel + ")   Citizens: " + me.citizens);
-            float by = tr.y + 25;
+
+            // Scrollable area under the title: mouse wheel or the scrollbar on the right
+            float bw = BeginPanelScroll(tr, ref townScroll, TownContentHeight());
+            float by = 0;
             if (me.townLevel < 2)
             {
                 GUI.enabled = CanUpgradeTown("Player");
-                if (GUI.Button(new Rect(tr.x + 10, by, 360, 30), "Upgrade to Level 2  " + upgradeCost.Text()))
+                if (GUI.Button(new Rect(6, by, bw, 30), "Upgrade to Level 2  " + upgradeCost.Text()))
                     UpgradeTown("Player");
             }
             else
             {
                 GUI.enabled = true;
-                GUI.Label(new Rect(tr.x + 10, by, 360, 30), "Town is fully upgraded");
+                GUI.Label(new Rect(6, by, bw, 30), "Town is fully upgraded");
             }
             GUI.enabled = true;
+
+            // Train Tier 1 warriors at the capital (same rules as a Barracks)
+            by += 38;
+            GUI.Label(new Rect(6, by, bw, 22),
+                trainedHere.Contains(selectedTile) ? "Train (capital already trained this turn)" : "Train a warrior (1 per turn here, uses 1 citizen)");
+            by += 22;
+            List<UnitType> townTrainable = Tier1Types();
+            for (int i = 0; i < townTrainable.Count; i++)
+            {
+                UnitType type = townTrainable[i];
+                GUI.enabled = CanTrain("Player", type, selectedTile);
+                if (GUI.Button(new Rect(6, by + i * 35, bw, 30),
+                    "Train " + type.name + "  " + type.cost.Text()))
+                    TrainUnit("Player", type, selectedTile);
+            }
+            GUI.enabled = true;
+            GUI.EndScrollView();
         }
 
         // Barracks panel: train Tier 1 warriors
@@ -1730,16 +1943,21 @@ public class GameManager : MonoBehaviour
         {
             Rect tr = BarracksRect();
             List<UnitType> trainable = Tier1Types();
-            GUI.Box(tr, (me.trainedThisTurn ? "Barracks (already trained this turn)" : "Barracks") + "   Citizens: " + me.citizens);
+            string barracksTitle = trainedHere.Contains(selectedTile) ? "Barracks (already trained this turn)"
+                                 : BarracksBlocked(selectedTile) ? "Barracks: move the unit off it first"
+                                 : "Barracks (1 warrior per turn)";
+            GUI.Box(tr, barracksTitle + "   Citizens: " + me.citizens);
+            float bw = BeginPanelScroll(tr, ref barracksScroll, ButtonsHeight(trainable.Count));
             for (int i = 0; i < trainable.Count; i++)
             {
                 UnitType type = trainable[i];
-                GUI.enabled = CanTrain("Player", type);
-                if (GUI.Button(new Rect(tr.x + 10, tr.y + 25 + i * 35, 360, 30),
+                GUI.enabled = CanTrain("Player", type, selectedTile);
+                if (GUI.Button(new Rect(6, i * 35, bw, 30),
                     "Train " + type.name + "  " + type.cost.Text()))
                     TrainUnit("Player", type, selectedTile);
             }
             GUI.enabled = true;
+            GUI.EndScrollView();
         }
 
         // Promote panel: Tier 1 to Tier 2 with Mana
@@ -1763,19 +1981,21 @@ public class GameManager : MonoBehaviour
         {
             Rect br = BuildRect(options.Count);
             GUI.Box(br, me.builtThisTurn ? "Build (already built this turn)" : "Build");
+            float bw = BeginPanelScroll(br, ref buildScroll, ButtonsHeight(options.Count));
             for (int i = 0; i < options.Count; i++)
             {
                 BuildingType bt = options[i];
                 GUI.enabled = CanBuild(bt, selectedTile, "Player");
-                if (GUI.Button(new Rect(br.x + 10, br.y + 25 + i * 35, 360, 30), bt.name + "  " + bt.cost.Text()))
+                if (GUI.Button(new Rect(6, i * 35, bw, 30), bt.name + "  " + bt.cost.Text()))
                     Build(bt, selectedTile, "Player");
             }
             GUI.enabled = true;
+            GUI.EndScrollView();
         }
 
         // Last message
         // Bottom left: last message + how to play, on a dark box so it's easy to read
-        float helpW = Mathf.Min(560, Screen.width - 370);
+        float helpW = Mathf.Max(200, Mathf.Min(560, Screen.width - ControlsRect().width - 40));
         Rect help = new Rect(10, Screen.height - 115, helpW, 105);
         GUI.Box(help, "");
 
@@ -1791,7 +2011,7 @@ public class GameManager : MonoBehaviour
         helpStyle.normal.textColor = Color.white;
         float hy = help.y + 32;
         GUI.Label(new Rect(help.x + 10, hy, helpW - 20, 20), "<b>Camera:</b>  WASD = move,  Scroll = zoom", helpStyle); hy += 18;
-        GUI.Label(new Rect(help.x + 10, hy, helpW - 20, 20), "<b>Building:</b>  click your town, a Barracks or your tile", helpStyle); hy += 18;
+        GUI.Label(new Rect(help.x + 10, hy, helpW - 20, 20), "<b>Building:</b>  click your town to upgrade or train, a Barracks, or your tile", helpStyle); hy += 18;
         GUI.Label(new Rect(help.x + 10, hy, helpW - 20, 20), "<b>Move:</b>  click a warrior, then a lit tile", helpStyle); hy += 18;
         GUI.Label(new Rect(help.x + 10, hy, helpW - 20, 20), "<b>Fight:</b>  click a warrior, then a yellow target", helpStyle);
 

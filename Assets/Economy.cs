@@ -140,6 +140,13 @@ public static class BuildingCatalog
             new BuildingType { name = "Outpost", cost = new Cost { wood = 20, mineral = 10 }, wheatUpkeep = 1,
                 claimRadius = 1, borderOnly = true,
                 shape = PrimitiveType.Cylinder, size = new Vector3(0.25f, 0.35f, 0.25f), color = Color.white },
+            // Barracks: an extra place to train Tier 1 warriors (the capital can train too)
+            new BuildingType { name = "Barracks", cost = new Cost { wood = 20, mineral = 10 },
+                shape = PrimitiveType.Cube, size = new Vector3(0.45f, 0.2f, 0.3f), color = new Color(0.55f, 0.2f, 0.2f) },
+            // Transmutation Lab: lets Tier 1 warriors promote to Tier 2
+            new BuildingType { name = "Transmutation Lab", cost = new Cost { wood = 20, mineral = 20, mana = 5 },
+                needsTownLevel = 2, onePerSide = true,
+                shape = PrimitiveType.Sphere, size = new Vector3(0.35f, 0.35f, 0.35f), color = new Color(0.3f, 0.9f, 0.8f) },
         };
     }
 }
