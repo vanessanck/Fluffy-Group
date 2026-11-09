@@ -168,6 +168,7 @@ public class GameManager : MonoBehaviour
     {
         if (showMenu) return;                // the game waits until a mode is picked in the main menu
         if (map == null || map.tiles == null || map.tiles.Count == 0 || map.tiles[0].obj == null) return;
+        map.FadeIconsUnder(new HashSet<HexTile>(units.Select(x => x.tile)));   // warriors show through resource icons
         if (!ready)
         {
             Random.InitState(map.usedSeed);   // same map seed = same enemy choices
@@ -1115,7 +1116,9 @@ public class GameManager : MonoBehaviour
             HexTile t = kv.Key;
             if (t == u.tile || !CanEnter(t, u.owner)) continue;
             bool affordable = kv.Value <= u.movesLeft;
-            bool oneStep = fullMoves && Dist(u.tile, t) == 1; // can always step one tile
+            // Can always step one tile, but only straight across an edge that is not a cliff
+            // (Dist == 1 alone let a warrior jump from lowland straight up onto a Plateau)
+            bool oneStep = fullMoves && Dist(u.tile, t) == 1 && Passable(u.tile, t, u.owner, false);
             if (affordable || oneStep) reachable.Add(t);
         }
 

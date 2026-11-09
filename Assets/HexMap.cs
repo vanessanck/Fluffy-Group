@@ -59,7 +59,12 @@ public class HexMap : MonoBehaviour
     [Range(0f, 1f)] public float passCarveChance = 0.25f;
 
     [Header("Resource icons")]
-    public float resourceIconSize = 1f;      // multiplier of the hex tile's flat-to-flat width
+    [Tooltip("Icon width as a share of the hex tile's width. 1 = fills the tile, 0.6 = a bit over half.")]
+    [Range(0.1f, 1.5f)] public float resourceIconSize = 0.5f;
+    [Tooltip("How solid the icons are. 1 = fully solid, 0 = invisible. Lower it to see the tile through the icon.")]
+    [Range(0f, 1f)] public float resourceIconOpacity = 1f;
+    [Tooltip("Opacity while a warrior stands on the tile, so the warrior is easy to see. 0 = hide the icon.")]
+    [Range(0f, 1f)] public float resourceIconOpacityUnderUnit = 0.45f;
 
     [Header("Random map (new map every Play)")]
     [Tooltip("On: a new random seed every time you press Play or New Map. Off: always use the Seed above.")]
@@ -733,6 +738,17 @@ public class HexMap : MonoBehaviour
 
     static Dictionary<ResourceType, Sprite> iconCache;
 
+    // Fades the icon on every tile a warrior is standing on, and shows the rest normally
+    public void FadeIconsUnder(HashSet<HexTile> occupied)
+    {
+        foreach (HexTile t in tiles)
+        {
+            if (t.icon == null) continue;
+            float a = occupied.Contains(t) ? resourceIconOpacityUnderUnit : resourceIconOpacity;
+            if (!Mathf.Approximately(t.icon.color.a, a)) t.icon.color = new Color(1f, 1f, 1f, a);
+        }
+    }
+
     // Reads Assets/Resources/ResourceIcons/Wheat.png and friends. The file is loaded as a plain
     // Texture2D and wrapped in a Sprite here at runtime, so the PNGs work straight out of the
     // folder - nobody has to open the Inspector and switch Texture Type over to Sprite.
@@ -769,6 +785,8 @@ public class HexMap : MonoBehaviour
 
             SpriteRenderer sr = g.AddComponent<SpriteRenderer>();
             sr.sprite = icon;
+            sr.color = new Color(1f, 1f, 1f, resourceIconOpacity);
+            t.icon = sr;
             g.AddComponent<Billboard>();
             return;
         }
@@ -998,4 +1016,5 @@ public class HexTile
     public GameObject obj;
     public Renderer rend;
     public Color baseColor;
+    public SpriteRenderer icon;  // resource picture on this tile (null if none)
 }
