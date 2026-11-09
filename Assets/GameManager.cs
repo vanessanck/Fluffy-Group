@@ -2,6 +2,8 @@ using UnityEngine;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine.SceneManagement;
+using System.IO;
+using System.Globalization;
 #if ENABLE_INPUT_SYSTEM
 using UnityEngine.InputSystem;
 #endif
@@ -10,6 +12,27 @@ public class GameManager : MonoBehaviour
 {
     // Every round has 4 phases, always in this order
     public enum Phase { Upkeep, Building, Move, Fight }
+
+    // ---------- Main menu ----------
+    // The menu shows before the game starts. Single Player = you play Blue against the computer.
+    // AI vs AI = the computer plays both sides (for research). Static, so Replay / New Map keep the mode.
+    public enum GameMode { SinglePlayer, AiVsAi }
+    public static bool showMenu = true;
+    public static GameMode mode = GameMode.SinglePlayer;
+
+    // Every new press of Unity's Play button starts at the menu again (also with domain reload turned off)
+    [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
+    static void ResetMenu() { showMenu = true; mode = GameMode.SinglePlayer; }
+
+    [Header("Main menu")]
+    public string gameTitle = "Fluffy War";
+    public bool logMatches = true;          // adds one row per finished match to ResearchExports/Match_Results.csv
+
+    bool menuPickMode = false;              // true after pressing Play: shows Single Player / AI vs AI
+    string menuMessage = "";
+    Texture2D menuBackground;
+    GUIStyle titleStyle, menuButtonStyle, menuTextStyle;
+    StrategyCamera strategyCamera;
 
     [Header("Rounds and phases")]
     public float upkeepSeconds = 1.5f;      // how long the Upkeep phase stays on screen before Building starts
@@ -108,6 +131,21 @@ public class GameManager : MonoBehaviour
     Unit selectedUnit;
     HexTile selectedTile;
 
+    // ---------- Build spot highlights ----------
+    // In your Building phase, tiles where you can build are tinted:
+    // green = you can build there right now, yellow = it fits, but you can't pay or already built this turn.
+    [Header("Build Spot Highlights")]
+    public bool showBuildSpots = true;
+    public Color buildNowColor = new Color(0.2f, 1f, 0.35f);
+    public Color buildLaterColor = new Color(1f, 0.8f, 0.2f);
+    [Range(0f, 1f)] public float buildTintStrength = 0.45f;
+    public float buildPulseSpeed = 3f;
+
+    List<HexTile> buildSpots = new List<HexTile>();     // tiles where the chosen building fits
+    HashSet<HexTile> buildNow = new HashSet<HexTile>(); // ...and you could build it this second
+    int buildFocus = -1;                                // -1 = any building, otherwise index into buildingTypes
+    string buildSpotsKey = "";
+
     string message = "";
     bool gameOver = false;
     string resultText = "";
@@ -120,14 +158,21 @@ public class GameManager : MonoBehaviour
         map = FindFirstObjectByType<HexMap>();
         cam = Camera.main;
         buildingTypes = BuildingCatalog.Create();
+
+        // No camera moving behind the menu
+        strategyCamera = FindFirstObjectByType<StrategyCamera>();
+        if (strategyCamera != null) strategyCamera.enabled = !showMenu;
     }
 
     void Update()
     {
+        if (showMenu) return;                // the game waits until a mode is picked in the main menu
         if (map == null || map.tiles == null || map.tiles.Count == 0 || map.tiles[0].obj == null) return;
         if (!ready)
         {
             Random.InitState(map.usedSeed);   // same map seed = same enemy choices
+            autoPlay = mode == GameMode.AiVsAi;
+            if (autoPlay) message = "AI vs AI: the computer plays both sides. Stop = take over Blue.";
 
             foreach (HexTile t in map.tiles)
             {
@@ -168,6 +213,9 @@ public class GameManager : MonoBehaviour
 #endif
 
         if (click && !OverUI(mousePos)) HandleClick(mousePos);
+
+        UpdateBuildSpots();
+        if (buildSpots.Count > 0) ApplyBuildTint();   // keeps the gentle pulse going
     }
 
     // ---------- Creating warriors ----------
@@ -817,7 +865,8 @@ public class GameManager : MonoBehaviour
         {
             message = town.town + " has been captured!";
             EndGame(a.owner == "Player" ? "You captured the enemy capital. You win!"
-                                        : "Your capital was captured. You lose!");
+                                        : "Your capital was captured. You lose!",
+                    a.owner, "captured_capital");
         }
     }
 
@@ -854,14 +903,24 @@ public class GameManager : MonoBehaviour
             if (u.owner == "Player") playerAlive = true;
             else enemyAlive = true;
         }
-        if (!enemyAlive) EndGame("All enemy warriors destroyed. You win!");
-        else if (!playerAlive) EndGame("All your warriors were destroyed. You lose!");
+        if (!enemyAlive) EndGame("All enemy warriors destroyed. You win!", "Player", "army_destroyed");
+        else if (!playerAlive) EndGame("All your warriors were destroyed. You lose!", "Enemy", "army_destroyed");
     }
 
-    void EndGame(string text)
+    // winner = "Player", "Enemy" or "" for a draw. reason goes into the research CSV.
+    void EndGame(string text, string winner, string reason)
     {
+        if (gameOver) return;
         gameOver = true;
         resultText = text;
+        if (mode == GameMode.AiVsAi)
+        {
+            string how = reason == "captured_capital" ? "captured the enemy capital"
+                       : reason == "army_destroyed" ? "destroyed every enemy warrior"
+                       : "round " + maxRounds + " reached";
+            resultText = winner == "" ? "Draw: " + how + "." : SideLabel(winner) + " wins: " + how + ".";
+        }
+        LogMatch(winner, reason);
         selectedUnit = null;
         reachable.Clear();
         targets.Clear();
@@ -880,6 +939,16 @@ public class GameManager : MonoBehaviour
         unitLookup.TryGetValue(go, out clickedUnit);
         HexTile tile = clickedUnit != null ? clickedUnit.tile : map.GetTile(go);
         if (tile == null) return;
+
+        // Placement: a building is chosen in the "Build spots" bar and you click a green tile
+        if (PlayerCanAct(Phase.Building) && buildFocus >= 0 && clickedUnit == null && buildNow.Contains(tile))
+        {
+            selectedTile = tile;
+            Build(buildingTypes[buildFocus], tile, "Player");
+            buildFocus = -1;          // back to showing every spot
+            RefreshHighlights();
+            return;
+        }
 
         // Attack a yellow target
         if (selectedUnit != null && targets.Contains(tile))
@@ -941,11 +1010,92 @@ public class GameManager : MonoBehaviour
     {
         foreach (HexTile t in map.tiles) map.SetHighlight(t, false);
         if (selectedTile != null) map.SetHighlight(selectedTile, true);
+        ApplyBuildTint();
         foreach (HexTile t in reachable) map.SetHighlight(t, true);
 
         foreach (Unit u in units) SetUnitColor(u, targets.Contains(u.tile));
         foreach (HexTile t in targets)
             if (t.town != "") map.SetHighlight(t, true);
+    }
+
+    // ---------- Build spots ----------
+
+    // Works out which tiles to tint. Uses the same FitsTile / CanBuild rules as the Build panel,
+    // and only recalculates when something that changes the answer has changed.
+    void UpdateBuildSpots()
+    {
+        string key = "";
+        if (showBuildSpots && PlayerCanAct(Phase.Building))
+        {
+            Side me = sides["Player"];
+            key = buildFocus + "|" + buildings.Count + "|" + me.builtThisTurn + "|" + me.townLevel + "|" + me.stock.Text();
+        }
+        if (key == buildSpotsKey) return;
+        buildSpotsKey = key;
+
+        buildSpots.Clear();
+        buildNow.Clear();
+        if (key != "")
+        {
+            foreach (HexTile t in map.tiles)
+            {
+                bool fits = false, now = false;
+                for (int i = 0; i < buildingTypes.Length; i++)
+                {
+                    if (buildFocus >= 0 && i != buildFocus) continue;
+                    if (!FitsTile(buildingTypes[i], t, "Player")) continue;
+                    fits = true;
+                    if (CanBuild(buildingTypes[i], t, "Player")) { now = true; break; }
+                }
+                if (fits) buildSpots.Add(t);
+                if (now) buildNow.Add(t);
+            }
+        }
+        RefreshHighlights();
+    }
+
+    // Paints the build spots (with a soft pulse). The selected tile stays brighter on top.
+    void ApplyBuildTint()
+    {
+        if (!PlayerCanAct(Phase.Building)) return;
+        float pulse = 0.75f + 0.25f * Mathf.Sin(Time.time * buildPulseSpeed);
+        foreach (HexTile t in buildSpots)
+        {
+            Color tint = buildNow.Contains(t) ? buildNowColor : buildLaterColor;
+            map.SetBuildTint(t, tint, buildTintStrength * pulse, t == selectedTile);
+        }
+    }
+
+    // Steps through "any building" and each building type
+    void CycleBuildFocus(int dir)
+    {
+        int n = buildingTypes.Length + 1;
+        int i = (buildFocus + 1 + dir + n) % n;
+        buildFocus = i - 1;
+    }
+
+    Rect BuildSpotsRect()
+    {
+        return new Rect(10, Screen.height - 170, 380, 50);
+    }
+
+    void DrawBuildSpotsBar()
+    {
+        if (!showBuildSpots || !PlayerCanAct(Phase.Building)) return;
+        Rect r = BuildSpotsRect();
+        GUI.Box(r, "");
+        if (GUI.Button(new Rect(r.x + 5, r.y + 5, 30, 22), "<")) CycleBuildFocus(-1);
+        if (GUI.Button(new Rect(r.xMax - 35, r.y + 5, 30, 22), ">")) CycleBuildFocus(1);
+
+        string label = buildFocus < 0
+            ? "Build spots: any building"
+            : "Build spots: " + buildingTypes[buildFocus].name + "  " + buildingTypes[buildFocus].cost.Text();
+        GUI.Label(new Rect(r.x + 42, r.y + 6, r.width - 84, 22), label);
+
+        string hint = buildSpots.Count == 0 ? "No spot fits right now"
+                    : buildFocus >= 0 ? "Click a green tile to build it. Yellow = can't pay / built this turn"
+                    : "Green = build now, yellow = can't pay / built this turn";
+        GUI.Label(new Rect(r.x + 10, r.y + 27, r.width - 20, 22), hint);
     }
 
     // ---------- Turns ----------
@@ -1042,7 +1192,7 @@ public class GameManager : MonoBehaviour
         {
             if (turn >= maxRounds)
             {
-                EndGame("Round " + maxRounds + " reached. The match is a draw.");
+                EndGame("Round " + maxRounds + " reached. The match is a draw.", "", "max_rounds");
                 return;
             }
             turn++;
@@ -1098,8 +1248,29 @@ public class GameManager : MonoBehaviour
         message = "Paused. You control your side again.";
     }
 
-    // Loads the scene again. The map uses the same seed, so you get the same map and the same enemy choices.
+    // Loads the scene again with the same map seed, so you get the same map and the same enemy choices.
     void PressReplay()
+    {
+        HexMap.replaySeed = map != null ? map.seed : -1;
+        ReloadScene();
+    }
+
+    // Loads the scene again with a brand new random map (if Randomize Every Run is on in HexMap).
+    void PressNewMap()
+    {
+        HexMap.replaySeed = -1;
+        ReloadScene();
+    }
+
+    // Back to the main menu. The next game gets a new random map.
+    void PressMenu()
+    {
+        showMenu = true;
+        HexMap.replaySeed = -1;
+        ReloadScene();
+    }
+
+    void ReloadScene()
     {
         Scene scene = SceneManager.GetActiveScene();
 #if UNITY_EDITOR
@@ -1184,7 +1355,7 @@ public class GameManager : MonoBehaviour
 
     // ---------- Screen ----------
 
-    // Bottom right: Play / Stop / Replay and Next Phase
+    // Bottom right: Play / Stop / Replay / New Map and Next Phase
     Rect ControlsRect()
     {
         return new Rect(Screen.width - 340, Screen.height - 115, 330, 105);
@@ -1274,6 +1445,7 @@ public class GameManager : MonoBehaviour
         if (TownPanelVisible() && TownRect().Contains(p)) return true;
         if (BarracksPanelVisible() && BarracksRect().Contains(p)) return true;
         if (PromotePanelVisible() && PromoteRect().Contains(p)) return true;
+        if (showBuildSpots && PlayerCanAct(Phase.Building) && BuildSpotsRect().Contains(p)) return true;
         int n = BuildOptions().Count;
         if (n > 0 && BuildRect(n).Contains(p)) return true;
         return false;
@@ -1281,6 +1453,7 @@ public class GameManager : MonoBehaviour
 
     string OwnerName(string owner)
     {
+        if (mode == GameMode.AiVsAi && owner != "") return SideLabel(owner);
         if (owner == "Player") return "You";
         if (owner == "Enemy") return "Enemy";
         return "Nobody";
@@ -1293,6 +1466,7 @@ public class GameManager : MonoBehaviour
 
     void OnGUI()
     {
+        if (showMenu) { DrawMainMenu(); return; }
         if (!ready) return;
 
         if (letterStyle == null)
@@ -1495,13 +1669,14 @@ public class GameManager : MonoBehaviour
         GUI.Label(new Rect(help.x + 10, hy, helpW - 20, 20), "<b>Move:</b>  click a warrior, then a lit tile", helpStyle); hy += 18;
         GUI.Label(new Rect(help.x + 10, hy, helpW - 20, 20), "<b>Fight:</b>  click a warrior, then a yellow target", helpStyle);
 
+        DrawBuildSpotsBar();
         DrawRoundBanner();
         DrawControls();
 
         if (gameOver)
         {
-            GUI.Box(new Rect(Screen.width / 2f - 250, Screen.height / 2f - 75, 500, 150),
-                    resultText + "\n\nPress Replay to play the same map again.", bigStyle);
+            GUI.Box(new Rect(Screen.width / 2f - 250, Screen.height / 2f - 85, 500, 170),
+                    resultText + "\n\nReplay = same map,  New Map = a new random map,\nMenu = back to the main menu.", bigStyle);
         }
     }
 
@@ -1535,12 +1710,12 @@ public class GameManager : MonoBehaviour
         }
     }
 
-    // Play, Stop, Replay and Next Phase buttons
+    // Play, Stop, Replay, New Map, Menu and Next Phase buttons
     void DrawControls()
     {
         Rect c = ControlsRect();
         GUI.Box(c, "");
-        float bw = (c.width - 30) / 3f;
+        float bw = (c.width - 40) / 5f;
 
         GUI.enabled = !autoPlay && !gameOver;
         if (GUI.Button(new Rect(c.x + 10, c.y + 10, bw, 35), "Play")) PressPlay();
@@ -1548,11 +1723,204 @@ public class GameManager : MonoBehaviour
         if (GUI.Button(new Rect(c.x + 15 + bw, c.y + 10, bw, 35), "Stop")) PressStop();
         GUI.enabled = true;
         if (GUI.Button(new Rect(c.x + 20 + bw * 2, c.y + 10, bw, 35), "Replay")) PressReplay();
+        if (GUI.Button(new Rect(c.x + 25 + bw * 3, c.y + 10, bw, 35), "New Map")) PressNewMap();
+        if (GUI.Button(new Rect(c.x + 30 + bw * 4, c.y + 10, bw, 35), "Menu")) PressMenu();
 
         GUI.enabled = !autoPlay && !gameOver && phase != Phase.Upkeep;
         string next = phase == Phase.Fight ? "End Round" : "Next: " + PhaseName(phase + 1);
         if (GUI.Button(new Rect(c.x + 10, c.y + 52, c.width - 20, 43), next)) NextPhase();
         GUI.enabled = true;
+    }
+
+    // ---------- Main menu ----------
+
+    // In AI vs AI both sides are computers, so they are named by color
+    string SideLabel(string owner)
+    {
+        return owner == "Player" ? "Blue AI" : owner == "Enemy" ? "Red AI" : "Nobody";
+    }
+
+    void DrawMainMenu()
+    {
+        if (titleStyle == null)
+        {
+            menuBackground = MakeTexture(new Color(0.08f, 0.10f, 0.16f, 1f));
+
+            titleStyle = new GUIStyle(GUI.skin.label);
+            titleStyle.fontSize = 64;
+            titleStyle.fontStyle = FontStyle.Bold;
+            titleStyle.alignment = TextAnchor.MiddleCenter;
+            titleStyle.normal.textColor = new Color(1f, 0.85f, 0.35f);
+
+            menuButtonStyle = new GUIStyle(GUI.skin.button);
+            menuButtonStyle.fontSize = 22;
+            menuButtonStyle.fontStyle = FontStyle.Bold;
+
+            menuTextStyle = new GUIStyle(GUI.skin.label);
+            menuTextStyle.fontSize = 14;
+            menuTextStyle.alignment = TextAnchor.UpperCenter;
+            menuTextStyle.wordWrap = true;
+            menuTextStyle.normal.textColor = new Color(0.85f, 0.88f, 0.95f);
+        }
+
+        // Solid background hides the map until the game starts
+        GUI.DrawTexture(new Rect(0, 0, Screen.width, Screen.height), menuBackground);
+
+        float cx = Screen.width / 2f;
+        float y = Screen.height * 0.18f;
+        GUI.Label(new Rect(0, y, Screen.width, 90), gameTitle, titleStyle);
+        y += 90;
+        GUI.Label(new Rect(cx - 250, y, 500, 24), "A turn-based hex strategy game", menuTextStyle);
+        y += 50;
+
+
+        if (!menuPickMode)
+        {
+            if (GUI.Button(MenuRow(ref y), "Play", menuButtonStyle)) { menuPickMode = true; menuMessage = ""; }
+            if (GUI.Button(MenuRow(ref y), "Export CSV (research)", menuButtonStyle)) menuMessage = ExportResearchCsv();
+            if (GUI.Button(MenuRow(ref y), "Quit", menuButtonStyle)) QuitGame();
+        }
+        else
+        {
+            if (GUI.Button(MenuRow(ref y), "Single Player", menuButtonStyle)) StartGame(GameMode.SinglePlayer);
+            if (GUI.Button(MenuRow(ref y), "AI vs AI (research)", menuButtonStyle)) StartGame(GameMode.AiVsAi);
+            if (GUI.Button(MenuRow(ref y), "Back", menuButtonStyle)) menuPickMode = false;
+            GUI.Label(new Rect(cx - 260, y, 520, 60),
+                "Single Player: you are Blue, the computer is Red.\n" +
+                "AI vs AI: the computer plays both sides and every result is saved to the CSV.", menuTextStyle);
+            y += 60;
+        }
+
+        if (menuMessage != "")
+            GUI.Label(new Rect(cx - 300, y + 10, 600, 80), menuMessage, menuTextStyle);
+    }
+
+    // The next menu button's place, then moves y down for the one after it
+    static Rect MenuRow(ref float y)
+    {
+        Rect r = new Rect(Screen.width / 2f - 160, y, 320, 50);
+        y += 64;
+        return r;
+    }
+
+    void StartGame(GameMode chosen)
+    {
+        mode = chosen;
+        showMenu = false;
+        menuPickMode = false;
+        if (strategyCamera != null) strategyCamera.enabled = true;
+        // Update() sets the game up on the next frame (the map was already made behind the menu)
+    }
+
+    void QuitGame()
+    {
+#if UNITY_EDITOR
+        UnityEditor.EditorApplication.isPlaying = false;
+#else
+        Application.Quit();
+#endif
+    }
+
+    // ---------- Research export (CSV) ----------
+
+    // Same folder HexMap writes Map_Generation_Log.csv into: <project>/ResearchExports
+    static string ResearchFolder()
+    {
+        return Path.GetFullPath(Path.Combine(Application.dataPath, "..", "ResearchExports"));
+    }
+
+    // Copies the research logs into ResearchExports/Export_<date_time>/ and opens that folder.
+    // Returns the text to show under the menu buttons.
+    string ExportResearchCsv()
+    {
+        try
+        {
+            string folder = ResearchFolder();
+            string[] logs = { "Map_Generation_Log.csv", "Match_Results.csv" };
+            string target = Path.Combine(folder, "Export_" + System.DateTime.Now.ToString("yyyyMMdd_HHmmss"));
+
+            int copied = 0;
+            foreach (string name in logs)
+            {
+                string src = Path.Combine(folder, name);
+                if (!File.Exists(src)) continue;
+                Directory.CreateDirectory(target);
+                File.Copy(src, Path.Combine(target, name), true);
+                copied++;
+            }
+            if (copied == 0) return "No CSV yet. Play a game first (each map and each finished match is logged).";
+
+#if UNITY_EDITOR
+            UnityEditor.EditorUtility.RevealInFinder(target);
+#else
+            Application.OpenURL("file://" + target);
+#endif
+            Debug.Log("Research CSV exported to " + target);
+            return "Exported " + copied + " CSV file(s) to:\n" + target;
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError("CSV export failed: " + e.Message);
+            return "Export failed: " + e.Message;
+        }
+    }
+
+    const string MatchHeader =
+        "timestamp,mode,base_seed,map_seed,rounds,winner,reason," +
+        "player_citizens,enemy_citizens,player_units,enemy_units,player_buildings,enemy_buildings," +
+        "player_town_level,enemy_town_level,player_town_hp,enemy_town_hp," +
+        "continent_share,start_gini,start_distance";
+
+    // One row per finished match in ResearchExports/Match_Results.csv
+    void LogMatch(string winner, string reason)
+    {
+        if (!logMatches || map == null) return;
+        try
+        {
+            string folder = ResearchFolder();
+            Directory.CreateDirectory(folder);
+            string file = Path.Combine(folder, "Match_Results.csv");
+
+            // A log with different columns is kept under a new name, so no data is lost
+            if (File.Exists(file))
+            {
+                string firstLine;
+                using (StreamReader rd = new StreamReader(file)) firstLine = rd.ReadLine();
+                if (firstLine != MatchHeader)
+                    File.Move(file, Path.Combine(folder, "Match_Results_old_" +
+                              System.DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".csv"));
+            }
+            bool newFile = !File.Exists(file);
+
+            CultureInfo inv = CultureInfo.InvariantCulture;
+            int pUnits = 0, eUnits = 0, pBuild = 0, eBuild = 0;
+            foreach (Unit u in units) { if (u.owner == "Player") pUnits++; else eUnits++; }
+            foreach (Building b in buildings.Values) { if (b.owner == "Player") pBuild++; else if (b.owner == "Enemy") eBuild++; }
+            HexTile pTown = FindTown("Player"), eTown = FindTown("Enemy");
+            int pHP = pTown != null && townHP.ContainsKey(pTown) ? townHP[pTown] : 0;
+            int eHP = eTown != null && townHP.ContainsKey(eTown) ? townHP[eTown] : 0;
+
+            using (StreamWriter w = new StreamWriter(file, true))
+            {
+                if (newFile) w.WriteLine(MatchHeader);
+                w.WriteLine(string.Join(",", new string[] {
+                    System.DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", inv),
+                    mode == GameMode.AiVsAi ? "ai_vs_ai" : "single_player",
+                    map.seed.ToString(inv), map.usedSeed.ToString(inv), turn.ToString(inv),
+                    winner == "" ? "draw" : winner, reason,
+                    sides["Player"].citizens.ToString(inv), sides["Enemy"].citizens.ToString(inv),
+                    pUnits.ToString(inv), eUnits.ToString(inv), pBuild.ToString(inv), eBuild.ToString(inv),
+                    sides["Player"].townLevel.ToString(inv), sides["Enemy"].townLevel.ToString(inv),
+                    pHP.ToString(inv), eHP.ToString(inv),
+                    map.continentShare.ToString("F4", inv), map.startGini.ToString("F4", inv),
+                    map.startDistance.ToString(inv)
+                }));
+            }
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError("Could not write Match_Results.csv: " + e.Message);
+        }
     }
 
     // A 1x1 colored texture for the yellow "current phase" box
