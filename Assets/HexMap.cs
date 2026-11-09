@@ -126,11 +126,51 @@ public class HexMap : MonoBehaviour
     public static int replaySeed = -1;
 
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
-    static void ResetStatics() { replaySeed = -1; }
+    static void ResetStatics() { replaySeed = -1; sharedBaseMat = null; }
 
     Dictionary<GameObject, HexTile> lookup = new Dictionary<GameObject, HexTile>();
     Mesh hexMesh;
     Material baseMat;
+
+    // ---- Shared material (fixes the pink/magenta map in a built game) ----
+    // CreatePrimitive's default material only works inside the Editor. In a build its
+    // shader is missing, so Unity draws everything magenta. We load a real URP material
+    // from Assets/Resources/HexMaterial.mat instead (Resources files are always in the build).
+    static Material sharedBaseMat;
+    public static Material BaseMaterial
+    {
+        get
+        {
+            if (sharedBaseMat != null) return sharedBaseMat;
+            Material fromResources = Resources.Load<Material>("HexMaterial");
+            if (fromResources != null) { sharedBaseMat = fromResources; return sharedBaseMat; }
+
+            // Fallback: find a shader by name (only works if it is in the build)
+            string[] names = {
+                "Universal Render Pipeline/Lit",
+                "Universal Render Pipeline/Simple Lit",
+                "Universal Render Pipeline/Unlit",
+                "Standard"
+            };
+            foreach (string n in names)
+            {
+                Shader sh = Shader.Find(n);
+                if (sh != null && sh.isSupported) { sharedBaseMat = new Material(sh); return sharedBaseMat; }
+            }
+            Debug.LogError("No usable shader found. Put a material named HexMaterial in Assets/Resources.");
+            GameObject temp = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            sharedBaseMat = temp.GetComponent<Renderer>().sharedMaterial;
+            Destroy(temp);
+            return sharedBaseMat;
+        }
+    }
+
+    // Give a CreatePrimitive object the working material (call before setting its color)
+    public static void UseBaseMaterial(GameObject go)
+    {
+        Renderer r = go.GetComponent<Renderer>();
+        if (r != null) r.sharedMaterial = BaseMaterial;
+    }
 
     static readonly Vector2Int[] directions = {
         new Vector2Int(1, 0), new Vector2Int(1, -1), new Vector2Int(0, -1),
@@ -140,9 +180,7 @@ public class HexMap : MonoBehaviour
     void Start()
     {
         iconCache = null;   // a fresh run picks up any art that changed since last time
-        GameObject temp = GameObject.CreatePrimitive(PrimitiveType.Cube);
-        baseMat = temp.GetComponent<Renderer>().sharedMaterial;
-        Destroy(temp);
+        baseMat = BaseMaterial;
         hexMesh = BuildHexMesh();
 
         // Pick the base seed: Replay reuses the last one, otherwise roll a new one (or keep the Inspector seed)
@@ -797,6 +835,7 @@ public class HexMap : MonoBehaviour
         b.transform.parent = transform;
         b.transform.localScale = Vector3.one * 0.22f;
         b.transform.position = spot + new Vector3(-0.03f, 0.11f, -0.03f);
+        UseBaseMaterial(b);
         b.GetComponent<Renderer>().material.color = ResourceColor(t.resource);
     }
 
@@ -880,6 +919,7 @@ public class HexMap : MonoBehaviour
             b.transform.parent = transform;
             b.transform.localScale = Vector3.one * sizes[i];
             b.transform.position = top + offsets[i] + Vector3.up * sizes[i] / 2f;
+            UseBaseMaterial(b);
             b.GetComponent<Renderer>().material.color = color;
             lookup[b] = t;
         }

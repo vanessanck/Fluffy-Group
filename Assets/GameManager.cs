@@ -277,6 +277,7 @@ public class GameManager : MonoBehaviour
     Unit CreateUnit(string owner, UnitType type, HexTile tile)
     {
         GameObject go = GameObject.CreatePrimitive(PrimitiveType.Capsule);
+        HexMap.UseBaseMaterial(go);
         go.name = owner + " " + type.name;
         go.transform.localScale = type.size;
 
@@ -639,6 +640,7 @@ public class GameManager : MonoBehaviour
     void AddModel(HexTile t, PrimitiveType shape, Vector3 size, Vector3 offset, Color color)
     {
         GameObject go = GameObject.CreatePrimitive(shape);
+        HexMap.UseBaseMaterial(go);
         Destroy(go.GetComponent<Collider>());
         go.transform.parent = map.transform;
         go.transform.localScale = size;
