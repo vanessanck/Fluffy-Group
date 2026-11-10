@@ -22,6 +22,8 @@ public class StrategyCamera : MonoBehaviour
             transform.position = map.MapCenter() + new Vector3(0f, 18f, -12.6f);
     }
 
+    [HideInInspector] public bool blockZoom;   // set by GameManager while the mouse is over a panel
+
     void Update()
     {
         Vector2 move = Vector2.zero;
@@ -43,6 +45,7 @@ public class StrategyCamera : MonoBehaviour
         move = new Vector2(Input.GetAxisRaw("Horizontal"), Input.GetAxisRaw("Vertical"));
         scroll = Mathf.Clamp(Input.mouseScrollDelta.y, -1f, 1f);
 #endif
+        if (blockZoom) scroll = 0f;   // the mouse wheel is scrolling a panel, not the camera
 
         // Move the camera
         transform.position += new Vector3(move.x, 0f, move.y) * panSpeed * Time.deltaTime;

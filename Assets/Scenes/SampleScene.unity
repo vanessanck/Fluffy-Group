@@ -478,66 +478,176 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: cbf9daf5b39314382b0cb8eb4170f15e, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::GameManager
+  gameTitle: Fluffy War
+  logMatches: 1
+  upkeepSeconds: 1.5
+  autoPhaseSeconds: 1
+  maxRounds: 100
   unitTypes:
   - name: Knight
     letter: K
+    tier: 1
     maxHP: 30
     attack: 8
     defense: 6
     moves: 1
     range: 1
     size: {x: 0.4, y: 0.4, z: 0.4}
-    wheatCost: 8
-    woodCost: 4
-    mineralCost: 8
+    cost:
+      wheat: 0
+      meat: 0
+      wood: 0
+      mineral: 0
+      water: 0
+      mana: 0
+    promotesTo: 
+    promoteCost:
+      wheat: 0
+      meat: 0
+      wood: 0
+      mineral: 0
+      water: 0
+      mana: 0
+    heavyArmor: 0
+    forestWalker: 0
+    forestBonus: 0
+    plainsCharge: 0
   - name: Cavalry
     letter: C
+    tier: 1
     maxHP: 22
     attack: 7
     defense: 3
     moves: 3
     range: 1
     size: {x: 0.45, y: 0.3, z: 0.45}
-    wheatCost: 10
-    woodCost: 6
-    mineralCost: 4
+    cost:
+      wheat: 0
+      meat: 0
+      wood: 0
+      mineral: 0
+      water: 0
+      mana: 0
+    promotesTo: 
+    promoteCost:
+      wheat: 0
+      meat: 0
+      wood: 0
+      mineral: 0
+      water: 0
+      mana: 0
+    heavyArmor: 0
+    forestWalker: 0
+    forestBonus: 0
+    plainsCharge: 0
   - name: Scout
     letter: S
+    tier: 1
     maxHP: 12
     attack: 3
     defense: 2
     moves: 3
     range: 1
     size: {x: 0.25, y: 0.25, z: 0.25}
-    wheatCost: 5
-    woodCost: 3
-    mineralCost: 0
+    cost:
+      wheat: 0
+      meat: 0
+      wood: 0
+      mineral: 0
+      water: 0
+      mana: 0
+    promotesTo: 
+    promoteCost:
+      wheat: 0
+      meat: 0
+      wood: 0
+      mineral: 0
+      water: 0
+      mana: 0
+    heavyArmor: 0
+    forestWalker: 0
+    forestBonus: 0
+    plainsCharge: 0
   - name: Archer
     letter: A
+    tier: 1
     maxHP: 15
     attack: 6
     defense: 2
     moves: 2
     range: 2
     size: {x: 0.3, y: 0.35, z: 0.3}
-    wheatCost: 6
-    woodCost: 8
-    mineralCost: 2
+    cost:
+      wheat: 0
+      meat: 0
+      wood: 0
+      mineral: 0
+      water: 0
+      mana: 0
+    promotesTo: 
+    promoteCost:
+      wheat: 0
+      meat: 0
+      wood: 0
+      mineral: 0
+      water: 0
+      mana: 0
+    heavyArmor: 0
+    forestWalker: 0
+    forestBonus: 0
+    plainsCharge: 0
   townMaxHP: 40
   townDefense: 4
-  terrainDefenseBonus: 2
-  startWheat: 10
-  startWood: 10
-  startMineral: 10
-  outpostWheat: 0
-  outpostWood: 15
-  outpostMineral: 10
-  outpostRadius: 1
-  upgradeWheat: 20
-  upgradeWood: 30
-  upgradeMineral: 30
+  woodsCoverBonus: 2
+  plainsChargeBonus: 0.5
+  startStock:
+    wheat: 40
+    meat: 15
+    wood: 40
+    mineral: 25
+    water: 30
+    mana: 0
+  startCitizens: 3
+  townLevel1Output:
+    wheat: 2
+    meat: 0
+    wood: 0
+    mineral: 0
+    water: 2
+    mana: 0
+  townLevel2Output:
+    wheat: 4
+    meat: 0
+    wood: 0
+    mineral: 0
+    water: 4
+    mana: 1
+  upgradeCost:
+    wheat: 0
+    meat: 0
+    wood: 30
+    mineral: 25
+    water: 0
+    mana: 5
   upgradedTownRadius: 3
   upgradedTownHP: 70
+  basePopCap: 10
+  level2PopBonus: 5
+  baseStorage: 100
+  growthSurplus: 5
+  citizenWheat: 1
+  citizenWater: 1
+  tier1Wheat: 1
+  tier2Wheat: 2
+  tier2Water: 1
+  starvationAttackPenalty: 0.25
+  starvationTurnsToLose: 2
+  dehydrationMovePenalty: 1
+  showBuildSpots: 1
+  buildNowColor: {r: 0.2, g: 1, b: 0.35, a: 1}
+  buildLaterColor: {r: 1, g: 0.8, b: 0.2, a: 1}
+  buildTintStrength: 0.45
+  buildPulseSpeed: 3
 --- !u!4 &1737687801
 Transform:
   m_ObjectHideFlags: 0
@@ -606,21 +716,55 @@ MonoBehaviour:
   elevationContrast: 2.2
   falloffStrength: 1
   falloffPower: 4
+  rareNoiseScale: 0.25
+  rareContrast: 2
+  resNoiseScale: 0.35
+  resContrast: 1
   waterLevel: 0.25
+  shallowLevel: 0.15
   hillsLevel: 0.58
   mountainLevel: 0.65
+  magicForestLevel: 0.82
+  resourceThreshold: 0.6
   passCarveChance: 0.25
+  resourceIconSize: 1
+  resourceIconOpacity: 1
+  resourceIconOpacityUnderUnit: 0.45
+  randomizeEveryRun: 1
+  randomizeParameters: 1
+  noiseScaleVariation: 0.03
+  waterLevelVariation: 0.03
+  mountainLevelVariation: 0.04
+  passCarveChanceVariation: 0.1
   maxAttempts: 50
   maxGini: 0.15
   fairnessRadius: 2
+  minContinentShare: 0.35
+  minStartDistance: 8
   townRadius: 2
   playerColor: {r: 0.2, g: 0.4, b: 1, a: 1}
   enemyColor: {r: 1, g: 0.25, b: 0.2, a: 1}
+  exportCsv: 1
   usedSeed: 0
   attemptsUsed: 0
+  totalTiles: 0
   walkableTiles: 0
+  plateauTiles: 0
   passCount: 0
+  passDensity: 0
+  resourceTiles: 0
+  playerStartNodes: 0
+  enemyStartNodes: 0
   startGini: 0
+  continentTiles: 0
+  continentShare: 0
+  startDistance: 0
+  usedNoiseScale: 0
+  usedWaterLevel: 0
+  usedHillsLevel: 0
+  usedMountainLevel: 0
+  usedPassCarveChance: 0
+  tiles: []
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0

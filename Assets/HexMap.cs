@@ -34,6 +34,7 @@ public class HexMap : MonoBehaviour
     public float hexSize = 1f;
 
     [Header("Noise heatmaps")]
+    [Tooltip("Only used when 'Use Fixed Seed' is ticked. Otherwise every game rolls a new random seed (never 0).")]
     public int seed = 0;
     public float noiseScale = 0.15f;
     [Range(1, 6)] public int octaves = 3;
@@ -59,11 +60,17 @@ public class HexMap : MonoBehaviour
     [Range(0f, 1f)] public float passCarveChance = 0.25f;
 
     [Header("Resource icons")]
-    public float resourceIconSize = 1f;      // multiplier of the hex tile's flat-to-flat width
+    [Tooltip("Icon width as a share of the hex tile's width. 1 = fills the tile, 0.6 = a bit over half.")]
+    [Range(0.1f, 1.5f)] public float resourceIconSize = 0.5f;
+    [Tooltip("How solid the icons are. 1 = fully solid, 0 = invisible. Lower it to see the tile through the icon.")]
+    [Range(0f, 1f)] public float resourceIconOpacity = 1f;
+    [Tooltip("Opacity while a warrior stands on the tile, so the warrior is easy to see. 0 = hide the icon.")]
+    [Range(0f, 1f)] public float resourceIconOpacityUnderUnit = 0.45f;
 
     [Header("Random map (new map every Play)")]
-    [Tooltip("On: a new random seed every time you press Play or New Map. Off: always use the Seed above.")]
-    public bool randomizeEveryRun = true;
+    [Tooltip("Off (default): a new random seed every time you press Play or New Map. " +
+             "On: always use the Seed above (handy to show one exact map). A Seed of 0 is always random.")]
+    public bool useFixedSeed = false;
     [Tooltip("On: each attempt also nudges the settings above by up to +/- these amounts (rolled from its own seed).")]
     public bool randomizeParameters = true;
     public float noiseScaleVariation = 0.03f;
@@ -79,6 +86,9 @@ public class HexMap : MonoBehaviour
     [Range(0f, 1f)] public float minContinentShare = 0.35f;
     [Tooltip("The two capitals must be at least this many tiles apart.")]
     public int minStartDistance = 8;
+    [Tooltip("Each side's starting territory must hold Wheat or Meat, Wood, Water and Mineral. " +
+             "On: a missing one is added to the best-fitting free tile in that territory. Off: the map is rejected instead.")]
+    public bool addMissingStartResources = true;
 
     [Header("Towns")]
     public int townRadius = 2;
@@ -103,6 +113,7 @@ public class HexMap : MonoBehaviour
     public int continentTiles;      // size of the biggest connected walkable region
     public float continentShare;    // continentTiles / totalTiles
     public int startDistance;       // tiles between the two capitals
+    public int startResourcesAdded; // resource tiles added so both territories have food, wood, water and mineral
 
     [Header("Settings used for this map (rolled per attempt)")]
     public float usedNoiseScale;
@@ -121,11 +132,59 @@ public class HexMap : MonoBehaviour
     public static int replaySeed = -1;
 
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
-    static void ResetStatics() { replaySeed = -1; }
+    static void ResetStatics() { replaySeed = -1; sharedBaseMat = null; }
+
+    // A fresh random seed from 1 to 1,999,999,999. Mixes a GUID with the clock, so two games
+    // started in the same millisecond (or with domain reload off) still get different maps.
+    public static int NewRandomSeed()
+    {
+        int mix = System.Guid.NewGuid().GetHashCode() ^ (int)(System.DateTime.Now.Ticks & 0x7fffffff);
+        return 1 + (int)((uint)mix % 1999999999u);
+    }
 
     Dictionary<GameObject, HexTile> lookup = new Dictionary<GameObject, HexTile>();
     Mesh hexMesh;
     Material baseMat;
+
+    // ---- Shared material (fixes the pink/magenta map in a built game) ----
+    // CreatePrimitive's default material only works inside the Editor. In a build its
+    // shader is missing, so Unity draws everything magenta. We load a real URP material
+    // from Assets/Resources/HexMaterial.mat instead (Resources files are always in the build).
+    static Material sharedBaseMat;
+    public static Material BaseMaterial
+    {
+        get
+        {
+            if (sharedBaseMat != null) return sharedBaseMat;
+            Material fromResources = Resources.Load<Material>("HexMaterial");
+            if (fromResources != null) { sharedBaseMat = fromResources; return sharedBaseMat; }
+
+            // Fallback: find a shader by name (only works if it is in the build)
+            string[] names = {
+                "Universal Render Pipeline/Lit",
+                "Universal Render Pipeline/Simple Lit",
+                "Universal Render Pipeline/Unlit",
+                "Standard"
+            };
+            foreach (string n in names)
+            {
+                Shader sh = Shader.Find(n);
+                if (sh != null && sh.isSupported) { sharedBaseMat = new Material(sh); return sharedBaseMat; }
+            }
+            Debug.LogError("No usable shader found. Put a material named HexMaterial in Assets/Resources.");
+            GameObject temp = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            sharedBaseMat = temp.GetComponent<Renderer>().sharedMaterial;
+            Destroy(temp);
+            return sharedBaseMat;
+        }
+    }
+
+    // Give a CreatePrimitive object the working material (call before setting its color)
+    public static void UseBaseMaterial(GameObject go)
+    {
+        Renderer r = go.GetComponent<Renderer>();
+        if (r != null) r.sharedMaterial = BaseMaterial;
+    }
 
     static readonly Vector2Int[] directions = {
         new Vector2Int(1, 0), new Vector2Int(1, -1), new Vector2Int(0, -1),
@@ -135,14 +194,13 @@ public class HexMap : MonoBehaviour
     void Start()
     {
         iconCache = null;   // a fresh run picks up any art that changed since last time
-        GameObject temp = GameObject.CreatePrimitive(PrimitiveType.Cube);
-        baseMat = temp.GetComponent<Renderer>().sharedMaterial;
-        Destroy(temp);
+        baseMat = BaseMaterial;
         hexMesh = BuildHexMesh();
 
-        // Pick the base seed: Replay reuses the last one, otherwise roll a new one (or keep the Inspector seed)
-        if (replaySeed >= 0) seed = replaySeed;
-        else if (randomizeEveryRun) seed = new System.Random().Next(1, 2000000);
+        // Pick the base seed: Replay reuses the last one, otherwise roll a new one.
+        // The Inspector seed is only used when Use Fixed Seed is ticked AND it isn't 0.
+        if (replaySeed > 0) seed = replaySeed;
+        else if (!useFixedSeed || seed <= 0) seed = NewRandomSeed();
         replaySeed = -1;
 
         // SBPCG loop: generate, validate, and resample until a map passes
@@ -156,7 +214,8 @@ public class HexMap : MonoBehaviour
 
             ExportAttempt(attempt + 1, s, result);
             if (result == "accepted") { accepted = true; break; }
-            if (fallbackAttempt < 0 && (result == "rejected_unfair_gini" || result == "rejected_small_continent"))
+            if (fallbackAttempt < 0 && (result == "rejected_unfair_gini" || result == "rejected_small_continent"
+                                        || result == "rejected_missing_resources"))
                 fallbackAttempt = attempt;
         }
 
@@ -180,13 +239,21 @@ public class HexMap : MonoBehaviour
                   ", start Gini " + startGini.ToString("F3") +
                   ", continent " + continentTiles + " tiles (" + (continentShare * 100f).ToString("F0") + "%)" +
                   ", capitals " + startDistance + " apart" +
+                  ", start resources added " + startResourcesAdded +
                   (exportCsv ? "   CSV saved in: " + ExportFolder() : ""));
     }
 
-    // Each attempt gets its own seed. Base seeds never share attempt seeds (as long as maxAttempts < 1000).
+    // Each attempt gets its own seed, made from the base seed and the attempt number.
+    // (Attempt 1 uses the base seed itself, so the seed in the log/Inspector rebuilds the same map.)
     int AttemptSeed(int attempt)
     {
-        return seed * 1000 + attempt;
+        if (attempt == 0) return seed;
+        unchecked
+        {
+            uint h = (uint)seed * 2654435761u + (uint)attempt * 40503u;
+            h ^= h >> 15;
+            return 1 + (int)(h % 1999999999u);
+        }
     }
 
     // Runs stages 2-5 for one seed and returns "accepted" or the reason it was rejected
@@ -197,6 +264,7 @@ public class HexMap : MonoBehaviour
         playerStartNodes = 0;
         enemyStartNodes = 0;
         startDistance = 0;
+        startResourcesAdded = 0;
 
         GenerateLayers(s);
         CountStats();
@@ -206,6 +274,18 @@ public class HexMap : MonoBehaviour
 
         // Capitals are only placed on the continent, so they can always reach each other
         if (!FindStarts()) return "rejected_no_land";
+
+        // A capital never sits on a resource tile (the town tile is not a resource tile)
+        startPlayer.resource = ResourceType.None;
+        startEnemy.resource = ResourceType.None;
+
+        // Both starting territories need Wheat or Meat, Wood, Water and Mineral
+        System.Random fixRng = new System.Random(s ^ 0x5bd1e995);
+        bool playerOk = EnsureStartResources(startPlayer, fixRng);
+        bool enemyOk = EnsureStartResources(startEnemy, fixRng);
+        CountStats();   // resource count changed
+        if (!playerOk || !enemyOk) return "rejected_missing_resources";
+
         startDistance = Distance(startPlayer, startEnemy);
         playerStartNodes = StartNodes(startPlayer);
         enemyStartNodes = StartNodes(startEnemy);
@@ -243,21 +323,42 @@ public class HexMap : MonoBehaviour
 
     // ---------- Research export (CSV) ----------
 
+    // Where the research CSVs go (same folder for HexMap and GameManager).
+    // Editor (Mac and Windows): <project>/ResearchExports.
+    // Built game: the per-user data folder, because a Mac .app (and Program Files on Windows) can be read-only:
+    //   Windows: %USERPROFILE%\AppData\LocalLow\<Company>\<Product>\ResearchExports
+    //   Mac:     ~/Library/Application Support/<Company>/<Product>/ResearchExports
+    public static string ResearchFolder()
+    {
+#if UNITY_EDITOR
+        return Path.GetFullPath(Path.Combine(Application.dataPath, "..", "ResearchExports"));
+#else
+        return Path.Combine(Application.persistentDataPath, "ResearchExports");
+#endif
+    }
+
     string ExportFolder()
     {
-        return Path.GetFullPath(Path.Combine(Application.dataPath, "..", "ResearchExports"));
+        return ResearchFolder();
     }
 
     const string LogHeader =
         "timestamp,base_seed,attempt,seed,result,columns,rows,total_tiles,walkable_tiles,plateau_tiles," +
         "mountain_passes,pass_density,resource_tiles,player_start_nodes,enemy_start_nodes,start_gini," +
         "pass_carve_chance,resource_threshold,max_gini," +
-        "noise_scale,water_level,mountain_level,continent_tiles,continent_share,start_distance";
+        "noise_scale,water_level,mountain_level,continent_tiles,continent_share,start_distance,start_resources_added";
 
     // Adds one row per map attempt to Map_Generation_Log.csv
+    // A failed write (read-only folder, file open in Excel, ...) only logs a warning: it must never stop the map.
     void ExportAttempt(int attempt, int s, string result)
     {
         if (!exportCsv) return;
+        try { WriteAttemptRow(attempt, s, result); }
+        catch (System.Exception e) { Debug.LogWarning("Could not write Map_Generation_Log.csv: " + e.Message); }
+    }
+
+    void WriteAttemptRow(int attempt, int s, string result)
+    {
 
         string folder = ExportFolder();
         Directory.CreateDirectory(folder);
@@ -289,7 +390,8 @@ public class HexMap : MonoBehaviour
                 startGini < 0f ? "" : startGini.ToString("F4", inv),
                 usedPassCarveChance.ToString("F4", inv), resourceThreshold.ToString(inv), maxGini.ToString(inv),
                 usedNoiseScale.ToString("F4", inv), usedWaterLevel.ToString("F4", inv), usedMountainLevel.ToString("F4", inv),
-                continentTiles.ToString(inv), continentShare.ToString("F4", inv), startDistance.ToString(inv)
+                continentTiles.ToString(inv), continentShare.ToString("F4", inv), startDistance.ToString(inv),
+                startResourcesAdded.ToString(inv)
             }));
         }
     }
@@ -597,6 +699,67 @@ public class HexMap : MonoBehaviour
         return false;
     }
 
+    // ---------- Starting resources ----------
+
+    // What every starting territory must hold. Wheat and Meat count as one group (food).
+    static readonly ResourceType[][] startNeeds = {
+        new[] { ResourceType.Wheat, ResourceType.Meat },
+        new[] { ResourceType.Wood },
+        new[] { ResourceType.Water },
+        new[] { ResourceType.Mineral },
+    };
+
+    // The tiles a capital owns at the start (same rule as PlaceTown)
+    List<HexTile> StartTerritory(HexTile capital)
+    {
+        List<HexTile> list = new List<HexTile>();
+        foreach (HexTile t in tiles)
+            if (Distance(t, capital) <= townRadius) list.Add(t);
+        return list;
+    }
+
+    // Makes sure the territory has food (Wheat or Meat), Wood, Water and Mineral.
+    // A missing one is put on the free tile whose terrain suits it best (Hills get Mineral,
+    // Woods get Wood, Coast gets Water, ...). Returns false if it can't (or adding is turned off).
+    bool EnsureStartResources(HexTile capital, System.Random rng)
+    {
+        List<HexTile> area = StartTerritory(capital);
+        foreach (ResourceType[] group in startNeeds)
+        {
+            if (area.Exists(t => System.Array.IndexOf(group, t.resource) >= 0)) continue;
+            if (!addMissingStartResources) return false;
+
+            HexTile best = null;
+            ResourceType bestRes = ResourceType.None;
+            float bestScore = float.MinValue;
+            foreach (HexTile t in area)
+            {
+                if (t == capital || t.resource != ResourceType.None || !IsWalkable(t.type)) continue;
+                if (!continent.Contains(t)) continue;           // must be reachable from the capital
+                foreach (ResourceType r in group)
+                {
+                    float w = SpawnTable()[t.type][System.Array.IndexOf(allResources, r)];
+                    // Prefer tiles where this resource is natural, then tiles 1-2 steps from the capital
+                    float score = w * 10f - Distance(t, capital) * 0.5f + (float)rng.NextDouble() * 0.1f;
+                    if (score > bestScore) { bestScore = score; best = t; bestRes = r; }
+                }
+            }
+            if (best == null) return false;
+            best.resource = bestRes;
+            startResourcesAdded++;
+        }
+        return true;
+    }
+
+    // True when the territory has Wheat or Meat, Wood, Water and Mineral
+    public bool HasStartResources(HexTile capital)
+    {
+        List<HexTile> area = StartTerritory(capital);
+        foreach (ResourceType[] group in startNeeds)
+            if (!area.Exists(t => System.Array.IndexOf(group, t.resource) >= 0)) return false;
+        return true;
+    }
+
     // Number of resource nodes within the fairness radius of a start tile
     int StartNodes(HexTile start)
     {
@@ -733,6 +896,17 @@ public class HexMap : MonoBehaviour
 
     static Dictionary<ResourceType, Sprite> iconCache;
 
+    // Fades the icon on every tile a warrior is standing on, and shows the rest normally
+    public void FadeIconsUnder(HashSet<HexTile> occupied)
+    {
+        foreach (HexTile t in tiles)
+        {
+            if (t.icon == null) continue;
+            float a = occupied.Contains(t) ? resourceIconOpacityUnderUnit : resourceIconOpacity;
+            if (!Mathf.Approximately(t.icon.color.a, a)) t.icon.color = new Color(1f, 1f, 1f, a);
+        }
+    }
+
     // Reads Assets/Resources/ResourceIcons/Wheat.png and friends. The file is loaded as a plain
     // Texture2D and wrapped in a Sprite here at runtime, so the PNGs work straight out of the
     // folder - nobody has to open the Inspector and switch Texture Type over to Sprite.
@@ -769,6 +943,8 @@ public class HexMap : MonoBehaviour
 
             SpriteRenderer sr = g.AddComponent<SpriteRenderer>();
             sr.sprite = icon;
+            sr.color = new Color(1f, 1f, 1f, resourceIconOpacity);
+            t.icon = sr;
             g.AddComponent<Billboard>();
             return;
         }
@@ -779,6 +955,7 @@ public class HexMap : MonoBehaviour
         b.transform.parent = transform;
         b.transform.localScale = Vector3.one * 0.22f;
         b.transform.position = spot + new Vector3(-0.03f, 0.11f, -0.03f);
+        UseBaseMaterial(b);
         b.GetComponent<Renderer>().material.color = ResourceColor(t.resource);
     }
 
@@ -838,6 +1015,11 @@ public class HexMap : MonoBehaviour
     void PlaceTown(HexTile town, string owner, string townName)
     {
         town.town = townName;
+        if (town.resource != ResourceType.None)      // safety net: a town tile is never a resource tile
+        {
+            town.resource = ResourceType.None;
+            if (town.icon != null) { Destroy(town.icon.gameObject); town.icon = null; }
+        }
 
         foreach (HexTile t in tiles)
             if (Distance(t, town) <= townRadius)
@@ -862,6 +1044,7 @@ public class HexMap : MonoBehaviour
             b.transform.parent = transform;
             b.transform.localScale = Vector3.one * sizes[i];
             b.transform.position = top + offsets[i] + Vector3.up * sizes[i] / 2f;
+            UseBaseMaterial(b);
             b.GetComponent<Renderer>().material.color = color;
             lookup[b] = t;
         }
@@ -998,4 +1181,5 @@ public class HexTile
     public GameObject obj;
     public Renderer rend;
     public Color baseColor;
+    public SpriteRenderer icon;  // resource picture on this tile (null if none)
 }
