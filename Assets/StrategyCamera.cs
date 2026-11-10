@@ -17,10 +17,12 @@ public class StrategyCamera : MonoBehaviour
 
         // Look down at the middle of the map
         transform.rotation = Quaternion.Euler(55f, 0f, 0f);
-        HexMap map = FindFirstObjectByType<HexMap>();
+        HexMap map = FindAnyObjectByType<HexMap>();
         if (map != null)
             transform.position = map.MapCenter() + new Vector3(0f, 18f, -12.6f);
     }
+
+    [HideInInspector] public bool blockZoom;   // set by GameManager while the mouse is over a panel
 
     void Update()
     {
@@ -43,6 +45,7 @@ public class StrategyCamera : MonoBehaviour
         move = new Vector2(Input.GetAxisRaw("Horizontal"), Input.GetAxisRaw("Vertical"));
         scroll = Mathf.Clamp(Input.mouseScrollDelta.y, -1f, 1f);
 #endif
+        if (blockZoom) scroll = 0f;   // the mouse wheel is scrolling a panel, not the camera
 
         // Move the camera
         transform.position += new Vector3(move.x, 0f, move.y) * panSpeed * Time.deltaTime;
