@@ -1,0 +1,2 @@
+timestamp,mode,base_seed,map_seed,rounds,winner,reason,player_citizens,enemy_citizens,player_units,enemy_units,player_buildings,enemy_buildings,player_town_level,enemy_town_level,player_town_hp,enemy_town_hp,continent_share,start_gini,start_distance
+2026-11-09 12:43:51,single_player,1170611,1170611000,15,Enemy,army_destroyed,0,0,0,2,5,5,1,1,40,40,0.6067,0.1000,15

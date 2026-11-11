@@ -105,6 +105,7 @@ public class Side
     public int starveTurns;         // turns in a row without enough wheat
     public bool starving;           // -25% attack
     public bool dehydrated;         // -1 move
+    public int meatEaten;           // Meat eaten at the last Upkeep because Wheat ran short
 }
 
 public static class BuildingCatalog

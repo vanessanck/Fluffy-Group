@@ -8,7 +8,7 @@ using System.Globalization;
 using UnityEngine.InputSystem;
 #endif
 
-public class GameManager : MonoBehaviour
+public partial class GameManager : MonoBehaviour
 {
     // Every round has 4 phases, always in this order
     public enum Phase { Upkeep, Building, Move, Fight }
@@ -22,7 +22,38 @@ public class GameManager : MonoBehaviour
 
     // Every new press of Unity's Play button starts at the menu again (also with domain reload turned off)
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
-    static void ResetMenu() { showMenu = true; mode = GameMode.SinglePlayer; }
+    static void ResetMenu()
+    {
+        showMenu = true; mode = GameMode.SinglePlayer;
+        speedIndex = 1; autoNextMatch = false;
+        matchesPlayed = 0; blueWins = 0; redWins = 0; draws = 0;
+        blueStrategy = AiStrategy.Balanced; redStrategy = AiStrategy.Balanced;
+    }
+
+    // ---------- Screen size in GUI units ----------
+    // All panels are laid out in "GUI units". On a big or Retina screen one unit is more than one pixel,
+    // so the HUD stays readable on a MacBook (2880x1800) as well as on a Windows 1080p monitor.
+    static float uiScaleNow = 1f;
+    static float SW { get { return Screen.width / uiScaleNow; } }
+    static float SH { get { return Screen.height / uiScaleNow; } }
+
+    void UpdateUiScale()
+    {
+        float s = uiScale > 0.01f ? uiScale : (Screen.height > 1200 ? Screen.height / 1080f : 1f);
+        uiScaleNow = Mathf.Clamp(s, 0.5f, 3f);
+    }
+
+    // ---------- Game speed (for testing) ----------
+    // Speeds up phase timers in Play / AI vs AI and the Upkeep pause. Max runs as many phases per frame as fit.
+    static readonly float[] speedSteps = { 0.5f, 1f, 2f, 4f, 8f, 16f, 50f };
+    static int speedIndex = 1;                 // 1x. Static: kept by Replay / New Map
+    static bool autoNextMatch = false;         // AI vs AI: start a new map by itself when a match ends
+    static int matchesPlayed, blueWins, redWins, draws;
+    float autoAccum = 0f;                      // seconds of auto play not yet turned into phases
+    float gameOverTime = -1f;
+
+    float GameSpeed { get { return speedSteps[Mathf.Clamp(speedIndex, 0, speedSteps.Length - 1)]; } }
+    string SpeedLabel(int i) { return speedSteps[i] >= 50f ? "Max" : speedSteps[i] + "x"; }
 
     [Header("Main menu")]
     public string gameTitle = "Fluffy War";
@@ -109,6 +140,29 @@ public class GameManager : MonoBehaviour
     public int upgradedTownRadius = 3;
     public int upgradedTownHP = 70;
 
+    // Small steady income from the capital itself, so a new game can always afford its first buildings.
+    // (New field names on purpose: the old Town Center values saved in the scene stay as they are.)
+    [Header("Capital starter output (on top of the Town Center output)")]
+    public Cost capitalOutputLevel1 = new Cost { wood = 2, mineral = 1 };
+    public Cost capitalOutputLevel2 = new Cost { wood = 3, mineral = 2 };
+
+    [Header("City food (Upkeep)")]
+    [Tooltip("Food the city itself eats every Upkeep, on top of citizens and warriors. Level 2 eats more.")]
+    public int cityFoodLevel1 = 1;
+    public int cityFoodLevel2 = 2;
+    [Tooltip("On: food is paid with Wheat first, then Meat. You only starve when Wheat AND Meat run out.")]
+    public bool meatCountsAsFood = true;
+
+    [Header("Warriors gather resources")]
+    [Tooltip("A warrior standing on a resource tile when Upkeep starts collects this much of that resource.")]
+    public int unitGatherAmount = 2;
+    [Tooltip("On: warriors can also gather on neutral or enemy land (raiding). Off: only inside your territory.")]
+    public bool gatherOutsideTerritory = true;
+
+    [Header("Screen")]
+    [Tooltip("0 = automatic (bigger on Retina Macs and 1440p/4K screens). Or set a fixed size, e.g. 1.5.")]
+    [Range(0f, 3f)] public float uiScale = 0f;
+
     [Header("Population and storage")]
     public int basePopCap = 10;         // citizens + warriors allowed with a Level 1 town
     public int level2PopBonus = 5;
@@ -189,6 +243,7 @@ public class GameManager : MonoBehaviour
 
     void Update()
     {
+        UpdateUiScale();
         if (showMenu) return;                // the game waits until a mode is picked in the main menu
         if (map == null || map.tiles == null || map.tiles.Count == 0 || map.tiles[0].obj == null) return;
         map.FadeIconsUnder(new HashSet<HexTile>(units.Select(x => x.tile)));   // warriors show through resource icons
@@ -197,6 +252,7 @@ public class GameManager : MonoBehaviour
             Random.InitState(map.usedSeed);   // same map seed = same enemy choices
             autoPlay = mode == GameMode.AiVsAi;
             if (autoPlay) message = "AI vs AI: the computer plays both sides. Stop = take over Blue.";
+            SetupBrains();
 
             foreach (HexTile t in map.tiles)
             {
@@ -216,10 +272,24 @@ public class GameManager : MonoBehaviour
         if (gameOver) return;
 
         // Upkeep moves on by itself. In Play mode every phase moves on by itself.
-        phaseTimer += Time.deltaTime;
-        if (autoPlay && phaseTimer >= autoPhaseSeconds) NextPhase();
-        else if (!autoPlay && phase == Phase.Upkeep && phaseTimer >= upkeepSeconds) NextPhase();
-        if (gameOver) return;
+        // The speed buttons make both go faster. At high speed several phases can run in one frame
+        // (stopping after ~25 ms so the window stays responsive).
+        float dt = Time.unscaledDeltaTime * GameSpeed;
+        phaseTimer += dt;
+        if (autoPlay)
+        {
+            autoAccum += dt;
+            float step = Mathf.Max(0.01f, autoPhaseSeconds);
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            while (autoPlay && !gameOver && autoAccum >= step && watch.ElapsedMilliseconds < 25)
+            {
+                autoAccum -= step;
+                NextPhase();
+            }
+            if (autoAccum > step * 4f) autoAccum = step * 4f;   // don't build up a huge backlog
+        }
+        else if (phase == Phase.Upkeep && phaseTimer >= upkeepSeconds) NextPhase();
+        if (gameOver) { UpdateAutoNextMatch(); return; }
 
         bool click = false;
         Vector2 mousePos = Vector2.zero;
@@ -411,6 +481,13 @@ public class GameManager : MonoBehaviour
     Cost Harvest(string owner)
     {
         Cost h = (sides[owner].townLevel >= 2 ? townLevel2Output : townLevel1Output).Copy();
+        if (FindTown(owner) != null)
+        {
+            Cost starter = sides[owner].townLevel >= 2 ? capitalOutputLevel2 : capitalOutputLevel1;
+            foreach (ResourceType r in Res.All) h.Add(r, starter.Get(r));
+        }
+        Cost g = Gathered(owner);
+        foreach (ResourceType r in Res.All) h.Add(r, g.Get(r));
         foreach (Building b in buildings.Values)
         {
             if (b.owner != owner || b.type.produces == ResourceType.None) continue;
@@ -422,11 +499,83 @@ public class GameManager : MonoBehaviour
         return h;
     }
 
-    // Phase 1, steps 2 and 3: what citizens, warriors and outposts eat and drink
+    // ---------- Warriors gathering ----------
+
+    // Can this warrior gather where it stands right now?
+    bool GathersHere(Unit u)
+    {
+        HexTile t = u.tile;
+        if (t == null || t.resource == ResourceType.None || t.town != "" || unitGatherAmount <= 0) return false;
+        return gatherOutsideTerritory || t.owner == u.owner;
+    }
+
+    // What this side's warriors collect at the next Upkeep: every warrior standing on a resource tile
+    // gathers unitGatherAmount of that tile's resource.
+    Cost Gathered(string owner)
+    {
+        Cost g = new Cost();
+        foreach (Unit u in units)
+            if (u.owner == owner && GathersHere(u)) g.Add(u.tile.resource, unitGatherAmount);
+        return g;
+    }
+
+    // "+2 Wood" text that floats above a gathering warrior for a moment after Upkeep
+    struct Popup { public Vector3 pos; public string text; public float start; public Color color; }
+    List<Popup> popups = new List<Popup>();
+
+    void ShowGatherPopups(string owner)
+    {
+        foreach (Unit u in units)
+        {
+            if (u.owner != owner || !GathersHere(u)) continue;
+            popups.Add(new Popup {
+                pos = u.obj.transform.position + Vector3.up * (u.type.size.y + 0.6f),
+                text = "+" + unitGatherAmount + " " + u.tile.resource,
+                start = Time.unscaledTime,
+                color = HexMap.ResourceColor(u.tile.resource)
+            });
+        }
+    }
+
+    void DrawPopups()
+    {
+        float life = 1.6f / Mathf.Min(GameSpeed, 4f);
+        popups.RemoveAll(p => Time.unscaledTime - p.start > life);
+        if (popups.Count == 0) return;
+        GUIStyle st = new GUIStyle(GUI.skin.label);
+        st.fontStyle = FontStyle.Bold;
+        st.fontSize = 13;
+        st.alignment = TextAnchor.MiddleCenter;
+        foreach (Popup p in popups)
+        {
+            float age = (Time.unscaledTime - p.start) / life;
+            Vector3 sp = cam.WorldToScreenPoint(p.pos + Vector3.up * age * 0.6f);
+            if (sp.z <= 0) continue;
+            sp /= uiScaleNow;
+            st.normal.textColor = new Color(p.color.r, p.color.g, p.color.b, 1f - age);
+            GUI.Label(new Rect(sp.x - 50, SH - sp.y - 10, 100, 20), p.text, st);
+        }
+    }
+
+    // Food the city itself eats each Upkeep
+    int CityFood(string owner)
+    {
+        if (FindTown(owner) == null) return 0;
+        return sides[owner].townLevel >= 2 ? cityFoodLevel2 : cityFoodLevel1;
+    }
+
+    // Total food needed this Upkeep (paid with Wheat first, then Meat)
+    int FoodNeed(string owner)
+    {
+        return Upkeep(owner).wheat;
+    }
+
+    // Phase 1, steps 2 and 3: what the city, citizens, warriors and outposts eat and drink
     Cost Upkeep(string owner)
     {
         Side s = sides[owner];
         Cost u = new Cost();
+        u.wheat += CityFood(owner);
         u.wheat += s.citizens * citizenWheat;
         u.water += s.citizens * citizenWater;
         foreach (Unit w in units)
@@ -455,8 +604,21 @@ public class GameManager : MonoBehaviour
     {
         Side s = sides[owner];
         Cost net = NetIncome(owner);
+        Cost gathered = Gathered(owner);
+        foreach (ResourceType r in Res.All) BrainFor(owner).totalGathered += gathered.Get(r);
         foreach (ResourceType r in Res.All) s.stock.Add(r, net.Get(r));
 
+        // Food is Wheat first; whatever Wheat can't cover is eaten as Meat
+        s.meatEaten = 0;
+        if (meatCountsAsFood && s.stock.wheat < 0 && s.stock.meat > 0)
+        {
+            int take = Mathf.Min(-s.stock.wheat, s.stock.meat);
+            s.stock.meat -= take;
+            s.stock.wheat += take;
+            s.meatEaten = take;
+        }
+
+        // Only starving when Wheat AND Meat together can't feed everyone
         bool wheatShort = s.stock.wheat < 0;
         bool waterShort = s.stock.water < 0;
 
@@ -490,6 +652,16 @@ public class GameManager : MonoBehaviour
         // Growth: enough wheat left over, no shortage, and room in the population cap
         if (!wheatShort && !waterShort && net.wheat >= growthSurplus && PopUsed(owner) < PopCap(owner))
             s.citizens++;
+
+        // Tell the player what their warriors gathered and if Meat was eaten
+        if (owner == "Player" && !gameOver && !wheatShort)
+        {
+            string got = gathered.Text();
+            string note = got != "(free)" ? "Warriors gathered " + got.Trim('(', ')') + "." : "";
+            if (s.meatEaten > 0) note += (note != "" ? "  " : "") + "Not enough Wheat: the city ate " + s.meatEaten + " Meat.";
+            if (note != "") message = note;
+        }
+        ShowGatherPopups(owner);
     }
 
     bool CanPay(string owner, Cost c)
@@ -742,64 +914,6 @@ public class GameManager : MonoBehaviour
         return options.Count > 0 && Build(type, options[0], owner);
     }
 
-    // ---------- Enemy economy ----------
-
-    void AiBuild(string owner)
-    {
-        Cost net = NetIncome(owner);
-
-        if (UpgradeTown(owner)) return;
-
-        // Fix shortages first
-        if (net.wheat <= 0 && BuildAnywhere(owner, "Farm")) return;
-        if (net.water <= 0 && BuildAnywhere(owner, "Well")) return;
-        if (PopUsed(owner) >= PopCap(owner) - 1 && BuildAnywhere(owner, "House")) return;
-
-        // The capital trains warriors, so no Barracks is needed first. Promotions need a Transmutation Lab.
-        if (BuildAnywhere(owner, "Transmutation Lab")) return;
-
-        // Then grow the economy
-        foreach (string name in new string[] { "Farm", "Lumber Camp", "Mine Quarry", "Well",
-                                               "Mana Sanctum", "Hunting Lodge" })
-            if (BuildAnywhere(owner, name)) return;
-
-        // One Barracks gives a second place to train when the capital is crowded
-        if (!HasBuilding(owner, "Barracks") && BuildAnywhere(owner, "Barracks")) return;
-
-        // Nothing left to harvest inside the territory: expand
-        if (Random.value < 0.5f) BuildAnywhere(owner, "Outpost");
-    }
-
-    void AiTrain(string owner)
-    {
-        if (sides[owner].stock.wheat < 15) return;   // keep enough food
-        int start = Random.Range(0, unitTypes.Length);
-        for (int i = 0; i < unitTypes.Length; i++)
-        {
-            UnitType type = unitTypes[(start + i) % unitTypes.Length];
-            if (type.tier == 1 && TrainUnit(owner, type)) return;
-        }
-    }
-
-    // The capital and every Barracks each try to train one warrior per turn
-    void AiTrainAll(string owner)
-    {
-        int tries = TrainingTiles(owner).Count;
-        for (int i = 0; i < tries; i++)
-        {
-            int before = UnitCount(owner);
-            AiTrain(owner);
-            if (UnitCount(owner) == before) break;   // nothing more could be trained
-        }
-    }
-
-    // Promote warriors that are resting at home, as long as there is Mana
-    void AiPromote(string owner)
-    {
-        foreach (Unit u in new List<Unit>(units))
-            if (u.owner == owner) Promote(u);
-    }
-
     // ---------- Helpers ----------
 
     int Dist(HexTile a, HexTile b)
@@ -983,17 +1097,11 @@ public class GameManager : MonoBehaviour
         else if (target.town != "" && target.owner != a.owner) AttackTown(a, target);
     }
 
+    // Destroying every enemy warrior no longer wins the game: a side with no warriors can still train more.
+    // The match ends only when a capital is captured (AttackTown) or the round limit is reached (draw).
+    // Kept as an empty hook so a new end rule can be added here later.
     void CheckGameOver()
     {
-        if (gameOver) return;
-        bool playerAlive = false, enemyAlive = false;
-        foreach (Unit u in units)
-        {
-            if (u.owner == "Player") playerAlive = true;
-            else enemyAlive = true;
-        }
-        if (!enemyAlive) EndGame("All enemy warriors destroyed. You win!", "Player", "army_destroyed");
-        else if (!playerAlive) EndGame("All your warriors were destroyed. You lose!", "Enemy", "army_destroyed");
     }
 
     // winner = "Player", "Enemy" or "" for a draw. reason goes into the research CSV.
@@ -1005,11 +1113,13 @@ public class GameManager : MonoBehaviour
         if (mode == GameMode.AiVsAi)
         {
             string how = reason == "captured_capital" ? "captured the enemy capital"
-                       : reason == "army_destroyed" ? "destroyed every enemy warrior"
                        : "round " + maxRounds + " reached";
             resultText = winner == "" ? "Draw: " + how + "." : SideLabel(winner) + " wins: " + how + ".";
         }
         LogMatch(winner, reason);
+        matchesPlayed++;
+        if (winner == "Player") blueWins++; else if (winner == "Enemy") redWins++; else draws++;
+        gameOverTime = Time.unscaledTime;
         selectedUnit = null;
         reachable.Clear();
         targets.Clear();
@@ -1031,7 +1141,7 @@ public class GameManager : MonoBehaviour
 
     Rect ConfirmRect()
     {
-        return new Rect(Screen.width / 2f - 175, Screen.height - 265, 350, 145);
+        return new Rect(SW / 2f - 175, SH - 265, 350, 145);
     }
 
     void CancelPending()
@@ -1280,11 +1390,11 @@ public class GameManager : MonoBehaviour
     // When a building is picked, the bar grows to list its build conditions (2 per row).
     Rect BuildSpotsRect()
     {
-        float w = Mathf.Max(380, Mathf.Min(620, Screen.width - ControlsRect().width - 30));
+        float w = Mathf.Max(380, Mathf.Min(620, SW - ControlsRect().width - 30));
         int rows = buildFocus >= 0 && buildingTypes != null
                  ? (BuildConditionCount(buildingTypes[buildFocus]) + 1) / 2 : 0;
         float h = 68 + rows * 17 + (rows > 0 ? 4 : 0);
-        return new Rect(10, Screen.height - 122 - h, w, h);
+        return new Rect(10, SH - 122 - h, w, h);
     }
 
     // How many lines BuildConditions makes (cheap, used for the bar size)
@@ -1410,6 +1520,8 @@ public class GameManager : MonoBehaviour
         List<string> list = new List<string>();
         if (autoPlay) list.Add("Player");
         list.Add("Enemy");
+        // AI vs AI: who acts first swaps every round, so neither color gets a first-move edge
+        if (list.Count == 2 && turn % 2 == 0) list.Reverse();
         return list;
     }
 
@@ -1451,9 +1563,9 @@ public class GameManager : MonoBehaviour
             foreach (string owner in ComputerSides())
             {
                 if (gameOver) break;
-                if (p == Phase.Building) { AiBuild(owner); AiTrainAll(owner); AiPromote(owner); }
-                else if (p == Phase.Move) AiMoveAll(owner);
-                else AiAttackAll(owner);
+                if (p == Phase.Building) AiBuildingPhase(owner);
+                else if (p == Phase.Move) AiMovePhase(owner);
+                else AiFightPhase(owner);
             }
         }
         RefreshHighlights();
@@ -1479,37 +1591,14 @@ public class GameManager : MonoBehaviour
         }
     }
 
-    // Move phase: warriors that can't hit anything walk toward the other capital
-    void AiMoveAll(string owner)
-    {
-        HexTile goalTown = FindTown(Enemy(owner));
-        if (goalTown == null) return;
-        foreach (Unit u in new List<Unit>(units))
-        {
-            if (gameOver) break;
-            if (u.owner != owner || !units.Contains(u) || u.movesLeft <= 0) continue;
-            if (FindTargets(u).Count > 0) continue;   // already in range: stay and fight
-            EnemyMove(u, goalTown);
-            u.movesLeft = 0;
-        }
-    }
-
-    // Fight phase: every warrior attacks if something is in range
-    void AiAttackAll(string owner)
-    {
-        foreach (Unit u in new List<Unit>(units))
-        {
-            if (gameOver) break;
-            if (u.owner != owner || !units.Contains(u)) continue;
-            EnemyTryAttack(u);
-        }
-    }
     // ---------- Play, Stop, Replay ----------
 
     void PressPlay()
     {
         if (gameOver) return;
         autoPlay = true;
+        autoPlayUsedForBlue = true;
+        autoAccum = 0f;
         phaseTimer = 0f;
         ClearSelection();
         RefreshHighlights();
@@ -1557,97 +1646,26 @@ public class GameManager : MonoBehaviour
 #endif
     }
 
-    bool EnemyTryAttack(Unit u)
-    {
-        List<HexTile> list = FindTargets(u);
-        if (list.Count == 0) return false;
-
-        HexTile best = null;
-        int lowestHP = int.MaxValue;
-        foreach (HexTile t in list)
-        {
-            Unit d = UnitAt(t);
-            if (d != null && d.hp < lowestHP) { lowestHP = d.hp; best = t; }
-        }
-        if (best == null) best = list[0];
-
-        Attack(u, best);
-        return true;
-    }
-
-    // The cheapest free tile from where this warrior can attack the target
-    HexTile BestGoal(Dictionary<HexTile, int> cost, HexTile target, Unit u)
-    {
-        HexTile best = null;
-        int bestCost = int.MaxValue;
-        foreach (KeyValuePair<HexTile, int> kv in cost)
-        {
-            if (Dist(kv.Key, target) > u.type.range) continue;   // ignores the high ground bonus on purpose
-            if (!CanEnter(kv.Key, u.owner)) continue;
-            if (kv.Value < bestCost) { bestCost = kv.Value; best = kv.Key; }
-        }
-        return best;
-    }
-
-    // Enemy follows the shortest path toward the target (around water and cliffs, through passes)
-    void EnemyMove(Unit u, HexTile target)
-    {
-        Dictionary<HexTile, HexTile> cameFrom;
-        Dictionary<HexTile, int> cost = CostsFrom(u.tile, u.owner, false, out cameFrom, u.type);
-        HexTile goal = BestGoal(cost, target, u);
-
-        // If your warriors block every path, plan as if they weren't there and walk up to them
-        if (goal == null)
-        {
-            cost = CostsFrom(u.tile, u.owner, true, out cameFrom, u.type);
-            goal = BestGoal(cost, target, u);
-        }
-        if (goal == null) return; // no path at all
-
-        // Rebuild the path from the goal back to the warrior
-        List<HexTile> path = new List<HexTile>();
-        for (HexTile t = goal; t != u.tile; t = cameFrom[t]) path.Insert(0, t);
-
-        // Walk along the path as far as the move points allow
-        int budget = MovesFor(u);
-        bool firstStep = true;
-        HexTile stop = null;
-        foreach (HexTile t in path)
-        {
-            int c = MoveCost(u.type, t);
-            if (c > budget && !firstStep) break;
-            budget -= c;
-            firstStep = false;
-
-            Unit other = UnitAt(t);
-            if (other != null && other.owner != u.owner) break; // blocked by your warrior
-            if (CanEnter(t, u.owner)) stop = t;
-            if (budget <= 0) break;
-        }
-
-        if (stop != null) PlaceUnit(u, stop);
-    }
-
     // ---------- Screen ----------
 
     // Bottom right: Play / Stop / Replay / New Map / Menu and Next Phase.
     // Wide enough that every button shows its whole word (about 86 px per button).
     Rect ControlsRect()
     {
-        float w = Mathf.Min(470, Screen.width - 20);
-        return new Rect(Screen.width - w - 10, Screen.height - 115, w, 105);
+        float w = Mathf.Min(470, SW - 20);
+        return new Rect(SW - w - 10, SH - 115, w, 105);
     }
 
     // Top middle: round number and the 4 phases
     Rect BannerRect()
     {
-        return new Rect(Screen.width / 2f - 200, 10, 400, 82);
+        return new Rect(SW / 2f - 200, 10, 400, 82);
     }
 
     // Top right: a compact resource box
     Rect ResourceRect()
     {
-        return new Rect(Screen.width - 210, 10, 200, 170);
+        return new Rect(SW - 210, 10, 200, 186);
     }
 
     bool TownPanelVisible()
@@ -1665,7 +1683,7 @@ public class GameManager : MonoBehaviour
     // If their buttons don't fit, they scroll with the mouse wheel or the scrollbar.
     Rect PanelRect(float contentHeight)
     {
-        float bottom = showBuildSpots ? BuildSpotsRect().y : Screen.height - 115;
+        float bottom = showBuildSpots ? BuildSpotsRect().y : SH - 115;
         float top = infoRect.yMax + 10;
         float maxH = Mathf.Max(90, bottom - 10 - top);
         return new Rect(10, top, 380, Mathf.Min(24 + contentHeight + 6, maxH));
@@ -1720,7 +1738,7 @@ public class GameManager : MonoBehaviour
 
     Rect PromoteRect()
     {
-        return new Rect(Screen.width - 260, ResourceRect().yMax + 10, 250, 75);
+        return new Rect(SW - 260, ResourceRect().yMax + 10, 250, 75);
     }
 
     // Why the promote button is grey
@@ -1750,10 +1768,11 @@ public class GameManager : MonoBehaviour
 
     bool OverUI(Vector2 mousePos)
     {
-        Vector2 p = new Vector2(mousePos.x, Screen.height - mousePos.y);
+        Vector2 p = new Vector2(mousePos.x / uiScaleNow, SH - mousePos.y / uiScaleNow);   // pixels -> GUI units
         if (infoRect.Contains(p) || ControlsRect().Contains(p) || ResourceRect().Contains(p)) return true;
         if (ConfirmVisible() && ConfirmRect().Contains(p)) return true;
-        if (BannerRect().Contains(p)) return true;
+        if (BannerRect().Contains(p) || SpeedRect().Contains(p)) return true;
+        if (autoPlay && AiStatusRect().Contains(p)) return true;
         if (TownPanelVisible() && TownRect().Contains(p)) return true;
         if (BarracksPanelVisible() && BarracksRect().Contains(p)) return true;
         if (PromotePanelVisible() && PromoteRect().Contains(p)) return true;
@@ -1778,6 +1797,8 @@ public class GameManager : MonoBehaviour
 
     void OnGUI()
     {
+        UpdateUiScale();
+        GUI.matrix = Matrix4x4.Scale(new Vector3(uiScaleNow, uiScaleNow, 1f));
         if (showMenu) { DrawMainMenu(); return; }
         if (!ready) return;
 
@@ -1826,8 +1847,9 @@ public class GameManager : MonoBehaviour
         foreach (Unit u in units)
         {
             Vector3 p = cam.WorldToScreenPoint(u.obj.transform.position + Vector3.up * (u.type.size.y + 0.25f));
+            p /= uiScaleNow;
             if (p.z > 0)
-                GUI.Label(new Rect(p.x - 30, Screen.height - p.y - 12, 60, 24),
+                GUI.Label(new Rect(p.x - 30, SH - p.y - 12, 60, 24),
                           u.type.letter + " " + u.hp, letterStyle);
         }
 
@@ -1850,7 +1872,8 @@ public class GameManager : MonoBehaviour
                 HexMap.TypeLabel(selectedTile.type) + "   Owner: " + OwnerName(selectedTile.owner), infoStyle); y += 16f;
             if (selectedTile.resource != ResourceType.None)
             {
-                GUI.Label(new Rect(18, y, 250, 18), "Resource tile: " + selectedTile.resource, infoStyle); y += 16f;
+                GUI.Label(new Rect(18, y, 250, 18), "Resource tile: " + selectedTile.resource +
+                          "  (warrior here: +" + unitGatherAmount + " at Upkeep)", infoStyle); y += 16f;
             }
             if (selectedTile.town != "" && townHP.ContainsKey(selectedTile))
             {
@@ -1874,6 +1897,8 @@ public class GameManager : MonoBehaviour
                 GUI.Label(new Rect(18, y, 250, 18),
                     "Moves " + u.movesLeft + "/" + MovesFor(u) + (u.hasAttacked ? "   (done)" : ""), infoStyle); y += 16f;
                 string note = TerrainNote(u);
+                if (GathersHere(u))
+                    note = "Gathering +" + unitGatherAmount + " " + u.tile.resource + " at Upkeep" + (note != "" ? ", " + note : "");
                 if (note != "") GUI.Label(new Rect(18, y, 250, 30), note, infoNoteStyle);
             }
         }
@@ -1894,6 +1919,9 @@ public class GameManager : MonoBehaviour
             GUI.Label(new Rect(r.x + 8, ry, lw, 18), res + ":  " + me.stock.Get(res) + "   (" + Signed(net.Get(res)) + ")", hudStyle);
             ry += 16;
         }
+        GUI.Label(new Rect(r.x + 8, ry, lw, 18),
+            "Food: eats " + FoodNeed("Player") + "/turn" + (meatCountsAsFood ? " (Wheat, then Meat)" : ""), hudStyle);
+        ry += 16;
         GUI.Label(new Rect(r.x + 8, ry, lw, 18),
             "Pop: " + me.citizens + " people + " + UnitCount("Player") + " units / " + PopCap("Player"), hudStyle);
         ry += 16;
@@ -1997,8 +2025,8 @@ public class GameManager : MonoBehaviour
 
         // Last message
         // Bottom left: last message + how to play, on a dark box so it's easy to read
-        float helpW = Mathf.Max(200, Mathf.Min(560, Screen.width - ControlsRect().width - 40));
-        Rect help = new Rect(10, Screen.height - 115, helpW, 105);
+        float helpW = Mathf.Max(200, Mathf.Min(560, SW - ControlsRect().width - 40));
+        Rect help = new Rect(10, SH - 115, helpW, 105);
         GUI.Box(help, "");
 
         GUIStyle msgStyle = new GUIStyle(GUI.skin.label);
@@ -2014,18 +2042,21 @@ public class GameManager : MonoBehaviour
         float hy = help.y + 32;
         GUI.Label(new Rect(help.x + 10, hy, helpW - 20, 20), "<b>Camera:</b>  WASD = move,  Scroll = zoom", helpStyle); hy += 18;
         GUI.Label(new Rect(help.x + 10, hy, helpW - 20, 20), "<b>Building:</b>  click your town to upgrade or train, a Barracks, or your tile", helpStyle); hy += 18;
-        GUI.Label(new Rect(help.x + 10, hy, helpW - 20, 20), "<b>Move:</b>  click a warrior, then a lit tile", helpStyle); hy += 18;
+        GUI.Label(new Rect(help.x + 10, hy, helpW - 20, 20), "<b>Move:</b>  click a warrior, then a lit tile. Stand on a resource tile to gather it", helpStyle); hy += 18;
         GUI.Label(new Rect(help.x + 10, hy, helpW - 20, 20), "<b>Fight:</b>  click a warrior, then a yellow target", helpStyle);
 
         DrawBuildSpotsBar();
         if (ConfirmVisible()) DrawAttackConfirm();
 
+        DrawPopups();
         DrawRoundBanner();
+        DrawSpeedBar();
         DrawControls();
+        if (autoPlay) DrawAiStatus();
 
         if (gameOver)
         {
-            GUI.Box(new Rect(Screen.width / 2f - 250, Screen.height / 2f - 85, 500, 170),
+            GUI.Box(new Rect(SW / 2f - 250, SH / 2f - 85, 500, 170),
                     resultText + "\n\nReplay = same map,  New Map = a new random map,\nMenu = back to the main menu.", bigStyle);
         }
     }
@@ -2055,7 +2086,7 @@ public class GameManager : MonoBehaviour
             Color old = GUI.color;
             GUI.color = new Color(1f, 1f, 1f, Mathf.Clamp01(2f - age));
             string text = phase == Phase.Upkeep ? "Round " + turn + "\n" + PhaseName(phase) : PhaseName(phase);
-            GUI.Label(new Rect(0, Screen.height * 0.25f - 60, Screen.width, 120), text, announceStyle);
+            GUI.Label(new Rect(0, SH * 0.25f - 60, SW, 120), text, announceStyle);
             GUI.color = old;
         }
     }
@@ -2080,6 +2111,51 @@ public class GameManager : MonoBehaviour
         string next = phase == Phase.Fight ? "End Round" : "Next: " + PhaseName(phase + 1);
         if (GUI.Button(new Rect(c.x + 10, c.y + 52, c.width - 20, 43), next)) NextPhase();
         GUI.enabled = true;
+    }
+
+    // ---------- Speed bar (under the round banner) ----------
+
+    bool autoPlayUsedForBlue = false;   // true if the computer played Blue at any point (for the CSV)
+
+    Rect SpeedRect()
+    {
+        bool aiMode = mode == GameMode.AiVsAi;
+        return new Rect(SW / 2f - 200, BannerRect().yMax + 4, 400, aiMode ? 54 : 30);
+    }
+
+    // Speed: 0.5x 1x 2x 4x 8x 16x Max. In AI vs AI also: auto next match + the score so far.
+    void DrawSpeedBar()
+    {
+        Rect r = SpeedRect();
+        GUI.Box(r, "");
+        GUI.Label(new Rect(r.x + 8, r.y + 4, 50, 22), "Speed");
+        float bw = (r.width - 66) / speedSteps.Length;
+        for (int i = 0; i < speedSteps.Length; i++)
+        {
+            bool on = i == speedIndex;
+            Color old = GUI.backgroundColor;
+            if (on) GUI.backgroundColor = new Color(1f, 0.85f, 0.3f);
+            if (GUI.Button(new Rect(r.x + 58 + i * bw, r.y + 4, bw - 2, 22), SpeedLabel(i)))
+            {
+                speedIndex = i;
+                autoAccum = 0f;
+            }
+            GUI.backgroundColor = old;
+        }
+
+        if (mode == GameMode.AiVsAi)
+        {
+            autoNextMatch = GUI.Toggle(new Rect(r.x + 8, r.y + 30, 150, 20), autoNextMatch, " Auto next match");
+            GUI.Label(new Rect(r.x + 160, r.y + 30, r.width - 168, 20),
+                      "Games " + matchesPlayed + ":  Blue " + blueWins + "  Red " + redWins + "  Draw " + draws);
+        }
+    }
+
+    // AI vs AI with "Auto next match": a short pause on the result, then a brand new map
+    void UpdateAutoNextMatch()
+    {
+        if (mode != GameMode.AiVsAi || !autoNextMatch || gameOverTime < 0f) return;
+        if (Time.unscaledTime - gameOverTime >= 2.5f / Mathf.Min(GameSpeed, 5f)) PressNewMap();
     }
 
     // ---------- Main menu ----------
@@ -2114,11 +2190,11 @@ public class GameManager : MonoBehaviour
         }
 
         // Solid background hides the map until the game starts
-        GUI.DrawTexture(new Rect(0, 0, Screen.width, Screen.height), menuBackground);
+        GUI.DrawTexture(new Rect(0, 0, SW, SH), menuBackground);
 
-        float cx = Screen.width / 2f;
-        float y = Screen.height * 0.18f;
-        GUI.Label(new Rect(0, y, Screen.width, 90), gameTitle, titleStyle);
+        float cx = SW / 2f;
+        float y = SH * 0.18f;
+        GUI.Label(new Rect(0, y, SW, 90), gameTitle, titleStyle);
         y += 90;
         GUI.Label(new Rect(cx - 250, y, 500, 24), "A turn-based hex strategy game", menuTextStyle);
         y += 50;
@@ -2134,10 +2210,19 @@ public class GameManager : MonoBehaviour
         {
             if (GUI.Button(MenuRow(ref y), "Single Player", menuButtonStyle)) StartGame(GameMode.SinglePlayer);
             if (GUI.Button(MenuRow(ref y), "AI vs AI (research)", menuButtonStyle)) StartGame(GameMode.AiVsAi);
+
+            // AI plans: click to cycle Balanced / Aggressive / Economic / Random
+            Rect half = new Rect(SW / 2f - 160, y, 156, 36);
+            if (GUI.Button(half, "Blue AI: " + blueStrategy)) blueStrategy = NextStrategy(blueStrategy);
+            half.x += 164;
+            if (GUI.Button(half, "Red AI: " + redStrategy)) redStrategy = NextStrategy(redStrategy);
+            y += 46;
+
             if (GUI.Button(MenuRow(ref y), "Back", menuButtonStyle)) menuPickMode = false;
-            GUI.Label(new Rect(cx - 260, y, 520, 60),
+            GUI.Label(new Rect(cx - 260, y, 520, 80),
                 "Single Player: you are Blue, the computer is Red.\n" +
-                "AI vs AI: the computer plays both sides and every result is saved to the CSV.", menuTextStyle);
+                "AI vs AI: the computer plays both sides and every result is saved to the CSV.\n" +
+                "Blue AI is used in AI vs AI (and after you press Play in a game).", menuTextStyle);
             y += 60;
         }
 
@@ -2148,7 +2233,7 @@ public class GameManager : MonoBehaviour
     // The next menu button's place, then moves y down for the one after it
     static Rect MenuRow(ref float y)
     {
-        Rect r = new Rect(Screen.width / 2f - 160, y, 320, 50);
+        Rect r = new Rect(SW / 2f - 160, y, 320, 50);
         y += 64;
         return r;
     }
@@ -2174,9 +2259,10 @@ public class GameManager : MonoBehaviour
     // ---------- Research export (CSV) ----------
 
     // Same folder HexMap writes Map_Generation_Log.csv into: <project>/ResearchExports
+    // Editor: <project>/ResearchExports. Built game: the per-user data folder (see HexMap.ResearchFolder).
     static string ResearchFolder()
     {
-        return Path.GetFullPath(Path.Combine(Application.dataPath, "..", "ResearchExports"));
+        return HexMap.ResearchFolder();
     }
 
     // Copies the research logs into ResearchExports/Export_<date_time>/ and opens that folder.
@@ -2203,7 +2289,7 @@ public class GameManager : MonoBehaviour
 #if UNITY_EDITOR
             UnityEditor.EditorUtility.RevealInFinder(target);
 #else
-            Application.OpenURL("file://" + target);
+            Application.OpenURL(new System.Uri(target).AbsoluteUri);   // file:///C:/... or file:///Users/... (spaces escaped)
 #endif
             Debug.Log("Research CSV exported to " + target);
             return "Exported " + copied + " CSV file(s) to:\n" + target;
@@ -2219,7 +2305,7 @@ public class GameManager : MonoBehaviour
         "timestamp,mode,base_seed,map_seed,rounds,winner,reason," +
         "player_citizens,enemy_citizens,player_units,enemy_units,player_buildings,enemy_buildings," +
         "player_town_level,enemy_town_level,player_town_hp,enemy_town_hp," +
-        "continent_share,start_gini,start_distance";
+        "continent_share,start_gini,start_distance,blue_strategy,red_strategy,player_gathered,enemy_gathered";
 
     // One row per finished match in ResearchExports/Match_Results.csv
     void LogMatch(string winner, string reason)
@@ -2263,7 +2349,10 @@ public class GameManager : MonoBehaviour
                     sides["Player"].townLevel.ToString(inv), sides["Enemy"].townLevel.ToString(inv),
                     pHP.ToString(inv), eHP.ToString(inv),
                     map.continentShare.ToString("F4", inv), map.startGini.ToString("F4", inv),
-                    map.startDistance.ToString(inv)
+                    map.startDistance.ToString(inv),
+                    autoPlayUsedForBlue ? StrategyFor("Player").ToString() : "human",
+                    StrategyFor("Enemy").ToString(),
+                    BrainFor("Player").totalGathered.ToString(inv), BrainFor("Enemy").totalGathered.ToString(inv)
                 }));
             }
         }
