@@ -68,8 +68,9 @@ public class HexMap : MonoBehaviour
     [Range(0f, 1f)] public float resourceIconOpacityUnderUnit = 0.45f;
 
     [Header("Random map (new map every Play)")]
-    [Tooltip("Off (default): a new random seed every time you press Play or New Map. " +
-             "On: always use the Seed above (handy to show one exact map). A Seed of 0 is always random.")]
+    [Tooltip("Off (default): a new random seed every game. " +
+             "On: the first game after Unity's Play button uses the Seed above (handy to show one exact map). " +
+             "New Map, Menu and Auto next match are always a new random map. A Seed of 0 is always random.")]
     public bool useFixedSeed = false;
     [Tooltip("On: each attempt also nudges the settings above by up to +/- these amounts (rolled from its own seed).")]
     public bool randomizeParameters = true;
@@ -128,11 +129,14 @@ public class HexMap : MonoBehaviour
     HexTile startPlayer, startEnemy;
     HashSet<HexTile> continent = new HashSet<HexTile>();
 
-    // Seed kept across a scene reload, so Replay gives the same map. -1 = roll a new one.
-    public static int replaySeed = -1;
+    // Set by New Map, Menu and Auto next match before the scene reloads: the next map is always
+    // a brand new random one, even if Use Fixed Seed is ticked. lastSeed = the map just played,
+    // so the new map can never be the same one.
+    public static bool forceNewRandomMap = false;
+    public static int lastSeed = -1;
 
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
-    static void ResetStatics() { replaySeed = -1; sharedBaseMat = null; }
+    static void ResetStatics() { forceNewRandomMap = false; lastSeed = -1; sharedBaseMat = null; }
 
     // A fresh random seed from 1 to 1,999,999,999. Mixes a GUID with the clock, so two games
     // started in the same millisecond (or with domain reload off) still get different maps.
@@ -197,11 +201,15 @@ public class HexMap : MonoBehaviour
         baseMat = BaseMaterial;
         hexMesh = BuildHexMesh();
 
-        // Pick the base seed: Replay reuses the last one, otherwise roll a new one.
-        // The Inspector seed is only used when Use Fixed Seed is ticked AND it isn't 0.
-        if (replaySeed > 0) seed = replaySeed;
-        else if (!useFixedSeed || seed <= 0) seed = NewRandomSeed();
-        replaySeed = -1;
+        // Pick the base seed: a new random one every game.
+        // The Inspector seed is only used for the first game after pressing Unity's Play button,
+        // when Use Fixed Seed is ticked AND it isn't 0. New Map / Menu / Auto next match always roll a new one.
+        if (forceNewRandomMap || !useFixedSeed || seed <= 0)
+        {
+            seed = NewRandomSeed();
+            while (seed == lastSeed) seed = NewRandomSeed();
+        }
+        forceNewRandomMap = false;
 
         // SBPCG loop: generate, validate, and resample until a map passes
         bool accepted = false;

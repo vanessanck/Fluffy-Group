@@ -15,7 +15,7 @@ public partial class GameManager : MonoBehaviour
 
     // ---------- Main menu ----------
     // The menu shows before the game starts. Single Player = you play Blue against the computer.
-    // AI vs AI = the computer plays both sides (for research). Static, so Replay / New Map keep the mode.
+    // AI vs AI = the computer plays both sides (for research). Static, so New Map and the next auto match keep the mode.
     public enum GameMode { SinglePlayer, AiVsAi }
     public static bool showMenu = true;
     public static GameMode mode = GameMode.SinglePlayer;
@@ -31,23 +31,28 @@ public partial class GameManager : MonoBehaviour
     }
 
     // ---------- Screen size in GUI units ----------
-    // All panels are laid out in "GUI units". On a big or Retina screen one unit is more than one pixel,
-    // so the HUD stays readable on a MacBook (2880x1800) as well as on a Windows 1080p monitor.
+    // All panels are laid out in "GUI units" on a virtual screen of at least HudWidth x HudHeight.
+    // The HUD is scaled so that virtual screen fills the real one, so the HUD always takes the same
+    // share of the screen: a small window, full screen 1080p, 1440p, 4K or a Retina Mac all look alike.
+    // A wider (or taller) screen just gets more room between the panels, they never overlap.
+    const float HudWidth = 1066f, HudHeight = 600f;
     static float uiScaleNow = 1f;
     static float SW { get { return Screen.width / uiScaleNow; } }
     static float SH { get { return Screen.height / uiScaleNow; } }
 
     void UpdateUiScale()
     {
-        float s = uiScale > 0.01f ? uiScale : (Screen.height > 1200 ? Screen.height / 1080f : 1f);
-        uiScaleNow = Mathf.Clamp(s, 0.5f, 3f);
+        float fit = Mathf.Min(Screen.width / HudWidth, Screen.height / HudHeight);
+        float s = fit * (uiScale > 0.01f ? uiScale : 1f);
+        // Never bigger than fits, so a manual size can't push panels on top of each other
+        uiScaleNow = Mathf.Clamp(Mathf.Min(s, fit), 0.3f, 6f);
     }
 
     // ---------- Game speed (for testing) ----------
     // Speeds up phase timers in Play / AI vs AI and the Upkeep pause. Max runs as many phases per frame as fit.
     static readonly float[] speedSteps = { 0.5f, 1f, 2f, 4f, 8f, 16f, 50f };
-    static int speedIndex = 1;                 // 1x. Static: kept by Replay / New Map
-    static bool autoNextMatch = false;         // AI vs AI: start a new map by itself when a match ends
+    static int speedIndex = 1;                 // 1x. Static: kept by New Map and the next auto match
+    static bool autoNextMatch = false;         // AI vs AI: start a new random map by itself when a match ends
     static int matchesPlayed, blueWins, redWins, draws;
     float autoAccum = 0f;                      // seconds of auto play not yet turned into phases
     float gameOverTime = -1f;
@@ -68,7 +73,9 @@ public partial class GameManager : MonoBehaviour
     [Header("Rounds and phases")]
     public float upkeepSeconds = 1.5f;      // how long the Upkeep phase stays on screen before Building starts
     public float autoPhaseSeconds = 1f;     // Play mode: seconds per phase (smaller = faster)
-    public int maxRounds = 100;             // the match ends in a draw after this many rounds
+    // New name (was maxRounds = 100), so the old 100 saved in the scene does not override the new default
+    [Tooltip("The match ends in a draw after this many rounds.")]
+    public int roundLimit = 250;
 
     // Tier 1 warriors are trained at the capital or a Barracks. Tier 2 warriors only come from promotion at a Transmutation Lab.
     public UnitType[] unitTypes = DefaultUnitTypes();
@@ -160,8 +167,9 @@ public partial class GameManager : MonoBehaviour
     public bool gatherOutsideTerritory = true;
 
     [Header("Screen")]
-    [Tooltip("0 = automatic (bigger on Retina Macs and 1440p/4K screens). Or set a fixed size, e.g. 1.5.")]
-    [Range(0f, 3f)] public float uiScale = 0f;
+    [Tooltip("0 or 1 = the HUD fills the same share of the screen at every resolution. " +
+             "Below 1 makes it smaller, e.g. 0.8. It never gets bigger than fits.")]
+    [Range(0f, 1f)] public float uiScale = 0f;
 
     [Header("Population and storage")]
     public int basePopCap = 10;         // citizens + warriors allowed with a Level 1 town
@@ -229,8 +237,17 @@ public partial class GameManager : MonoBehaviour
     Rect infoRect = new Rect(10, 10, 270, 175);   // top-left info box (compact)
     GUIStyle letterStyle, bigStyle, warnStyle, roundStyle, phaseOnStyle, phaseOffStyle, announceStyle;
 
+    // Keep playing (AI vs AI, auto next match) when the window loses focus, e.g. after Alt+Tab.
+    // Set before the first scene loads, again in Start, and again whenever focus changes,
+    // so nothing (a scene setting, another script) can switch it back off.
+    [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
+    static void KeepRunningInBackground() { Application.runInBackground = true; }
+
+    void OnApplicationFocus(bool focused) { Application.runInBackground = true; }
+
     void Start()
     {
+        Application.runInBackground = true;
         map = FindAnyObjectByType<HexMap>();
         cam = Camera.main;
         buildingTypes = BuildingCatalog.Create();
@@ -252,6 +269,7 @@ public partial class GameManager : MonoBehaviour
             Random.InitState(map.usedSeed);   // same map seed = same enemy choices
             autoPlay = mode == GameMode.AiVsAi;
             if (autoPlay) message = "AI vs AI: the computer plays both sides. Stop = take over Blue.";
+            autoPlayUsedForBlue = autoPlay;   // AI vs AI: the CSV names Blue's AI plan instead of "human"
             SetupBrains();
 
             foreach (HexTile t in map.tiles)
@@ -269,7 +287,9 @@ public partial class GameManager : MonoBehaviour
             ready = true;
             BeginPhase(Phase.Upkeep);    // round 1 starts
         }
-        if (gameOver) return;
+        // A finished match still has to count down to the next one (this used to just return,
+        // so Auto next match never fired)
+        if (gameOver) { UpdateAutoNextMatch(); return; }
 
         // Upkeep moves on by itself. In Play mode every phase moves on by itself.
         // The speed buttons make both go faster. At high speed several phases can run in one frame
@@ -506,7 +526,16 @@ public partial class GameManager : MonoBehaviour
     {
         HexTile t = u.tile;
         if (t == null || t.resource == ResourceType.None || t.town != "" || unitGatherAmount <= 0) return false;
+        if (HasExtractor(t)) return false;   // a Farm / Lumber Camp / ... already collects this tile: no double collecting
         return gatherOutsideTerritory || t.owner == u.owner;
+    }
+
+    // True when a building that collects resources (Farm, Lumber Camp, Mine Quarry, Well, Hunting Lodge,
+    // Mana Sanctum) stands on this tile, whoever owns it. Warriors can't gather on such a tile.
+    bool HasExtractor(HexTile t)
+    {
+        Building b;
+        return t != null && buildings.TryGetValue(t, out b) && b.type.produces != ResourceType.None;
     }
 
     // What this side's warriors collect at the next Upkeep: every warrior standing on a resource tile
@@ -1113,7 +1142,7 @@ public partial class GameManager : MonoBehaviour
         if (mode == GameMode.AiVsAi)
         {
             string how = reason == "captured_capital" ? "captured the enemy capital"
-                       : "round " + maxRounds + " reached";
+                       : "round " + roundLimit + " reached";
             resultText = winner == "" ? "Draw: " + how + "." : SideLabel(winner) + " wins: " + how + ".";
         }
         LogMatch(winner, reason);
@@ -1577,9 +1606,9 @@ public partial class GameManager : MonoBehaviour
         if (gameOver) return;
         if (phase == Phase.Fight)
         {
-            if (turn >= maxRounds)
+            if (turn >= roundLimit)
             {
-                EndGame("Round " + maxRounds + " reached. The match is a draw.", "", "max_rounds");
+                EndGame("Round " + roundLimit + " reached. The match is a draw.", "", "max_rounds");
                 return;
             }
             turn++;
@@ -1591,7 +1620,7 @@ public partial class GameManager : MonoBehaviour
         }
     }
 
-    // ---------- Play, Stop, Replay ----------
+    // ---------- Play, Stop, New Map ----------
 
     void PressPlay()
     {
@@ -1612,17 +1641,13 @@ public partial class GameManager : MonoBehaviour
         message = "Paused. You control your side again.";
     }
 
-    // Loads the scene again with the same map seed, so you get the same map and the same enemy choices.
-    void PressReplay()
-    {
-        HexMap.replaySeed = map != null ? map.seed : -1;
-        ReloadScene();
-    }
-
-    // Loads the scene again with a brand new random map (if Randomize Every Run is on in HexMap).
+    // Loads the scene again with a brand new random map. Always random, even when
+    // HexMap > Use Fixed Seed is ticked, and never the map that was just played.
+    // (There is no "Replay same map" any more.)
     void PressNewMap()
     {
-        HexMap.replaySeed = -1;
+        HexMap.forceNewRandomMap = true;
+        HexMap.lastSeed = map != null ? map.seed : -1;
         ReloadScene();
     }
 
@@ -1630,7 +1655,8 @@ public partial class GameManager : MonoBehaviour
     void PressMenu()
     {
         showMenu = true;
-        HexMap.replaySeed = -1;
+        HexMap.forceNewRandomMap = true;
+        HexMap.lastSeed = map != null ? map.seed : -1;
         ReloadScene();
     }
 
@@ -1648,7 +1674,7 @@ public partial class GameManager : MonoBehaviour
 
     // ---------- Screen ----------
 
-    // Bottom right: Play / Stop / Replay / New Map / Menu and Next Phase.
+    // Bottom right: Play / Stop / New Map / Menu and Next Phase.
     // Wide enough that every button shows its whole word (about 86 px per button).
     Rect ControlsRect()
     {
@@ -1665,7 +1691,7 @@ public partial class GameManager : MonoBehaviour
     // Top right: a compact resource box
     Rect ResourceRect()
     {
-        return new Rect(SW - 210, 10, 200, 186);
+        return new Rect(SW - 260, 10, 250, 186);   // wide enough for "Food: eats 14/turn (Wheat, then Meat)"
     }
 
     bool TownPanelVisible()
@@ -1872,8 +1898,16 @@ public partial class GameManager : MonoBehaviour
                 HexMap.TypeLabel(selectedTile.type) + "   Owner: " + OwnerName(selectedTile.owner), infoStyle); y += 16f;
             if (selectedTile.resource != ResourceType.None)
             {
-                GUI.Label(new Rect(18, y, 250, 18), "Resource tile: " + selectedTile.resource +
-                          "  (warrior here: +" + unitGatherAmount + " at Upkeep)", infoStyle); y += 16f;
+                if (HasExtractor(selectedTile))
+                {
+                    GUI.Label(new Rect(18, y, 250, 18), "Resource tile: " + selectedTile.resource, infoStyle); y += 16f;
+                    GUI.Label(new Rect(18, y, 250, 18), "Warriors can't gather here (" + buildings[selectedTile].type.name + " collects it)", infoStyle); y += 16f;
+                }
+                else
+                {
+                    GUI.Label(new Rect(18, y, 250, 18), "Resource tile: " + selectedTile.resource +
+                              "  (warrior here: +" + unitGatherAmount + " at Upkeep)", infoStyle); y += 16f;
+                }
             }
             if (selectedTile.town != "" && townHP.ContainsKey(selectedTile))
             {
@@ -2057,7 +2091,7 @@ public partial class GameManager : MonoBehaviour
         if (gameOver)
         {
             GUI.Box(new Rect(SW / 2f - 250, SH / 2f - 85, 500, 170),
-                    resultText + "\n\nReplay = same map,  New Map = a new random map,\nMenu = back to the main menu.", bigStyle);
+                    resultText + "\n\n" + GameOverHint(), bigStyle);
         }
     }
 
@@ -2067,7 +2101,7 @@ public partial class GameManager : MonoBehaviour
         Rect b = BannerRect();
         GUI.Box(b, "");
         GUI.Label(new Rect(b.x, b.y + 2, b.width, 28),
-                  "Round " + turn + " / " + maxRounds + (autoPlay ? "   (auto play)" : ""), roundStyle);
+                  "Round " + turn + " / " + roundLimit + (autoPlay ? "   (auto play)" : ""), roundStyle);
 
         Phase[] all = { Phase.Upkeep, Phase.Building, Phase.Move, Phase.Fight };
         float w = (b.width - 20) / all.Length;
@@ -2086,26 +2120,37 @@ public partial class GameManager : MonoBehaviour
             Color old = GUI.color;
             GUI.color = new Color(1f, 1f, 1f, Mathf.Clamp01(2f - age));
             string text = phase == Phase.Upkeep ? "Round " + turn + "\n" + PhaseName(phase) : PhaseName(phase);
-            GUI.Label(new Rect(0, SH * 0.25f - 60, SW, 120), text, announceStyle);
+            // Under the speed bar, so it never covers the round banner or the speed buttons
+            GUI.Label(new Rect(0, SpeedRect().yMax + 6, SW, 120), text, announceStyle);
             GUI.color = old;
         }
     }
 
-    // Play, Stop, Replay, New Map, Menu and Next Phase buttons
+    // Text under the result: what happens next
+    string GameOverHint()
+    {
+        if (mode == GameMode.AiVsAi && autoNextMatch)
+        {
+            float left = Mathf.Max(0f, AutoNextDelay() - (Time.unscaledTime - gameOverTime));
+            return "Next match on a new random map in " + left.ToString("0.0") + " s\n(untick Auto next match to stay here)";
+        }
+        return "New Map = play again on a new random map,\nMenu = back to the main menu.";
+    }
+
+    // Play, Stop, New Map, Menu and Next Phase buttons
     void DrawControls()
     {
         Rect c = ControlsRect();
         GUI.Box(c, "");
-        float bw = (c.width - 40) / 5f;
+        float bw = (c.width - 35) / 4f;
 
         GUI.enabled = !autoPlay && !gameOver;
         if (GUI.Button(new Rect(c.x + 10, c.y + 10, bw, 35), "Play")) PressPlay();
         GUI.enabled = autoPlay;
         if (GUI.Button(new Rect(c.x + 15 + bw, c.y + 10, bw, 35), "Stop")) PressStop();
         GUI.enabled = true;
-        if (GUI.Button(new Rect(c.x + 20 + bw * 2, c.y + 10, bw, 35), "Replay")) PressReplay();
-        if (GUI.Button(new Rect(c.x + 25 + bw * 3, c.y + 10, bw, 35), "New Map")) PressNewMap();
-        if (GUI.Button(new Rect(c.x + 30 + bw * 4, c.y + 10, bw, 35), "Menu")) PressMenu();
+        if (GUI.Button(new Rect(c.x + 20 + bw * 2, c.y + 10, bw, 35), "New Map")) PressNewMap();
+        if (GUI.Button(new Rect(c.x + 25 + bw * 3, c.y + 10, bw, 35), "Menu")) PressMenu();
 
         GUI.enabled = !autoPlay && !gameOver && phase != Phase.Upkeep;
         string next = phase == Phase.Fight ? "End Round" : "Next: " + PhaseName(phase + 1);
@@ -2145,17 +2190,30 @@ public partial class GameManager : MonoBehaviour
 
         if (mode == GameMode.AiVsAi)
         {
+            bool wasOn = autoNextMatch;
             autoNextMatch = GUI.Toggle(new Rect(r.x + 8, r.y + 30, 150, 20), autoNextMatch, " Auto next match");
+            if (autoNextMatch && !wasOn && gameOver) gameOverTime = Time.unscaledTime;   // ticked on the result screen: full pause first
             GUI.Label(new Rect(r.x + 160, r.y + 30, r.width - 168, 20),
                       "Games " + matchesPlayed + ":  Blue " + blueWins + "  Red " + redWins + "  Draw " + draws);
         }
     }
 
-    // AI vs AI with "Auto next match": a short pause on the result, then a brand new map
+    // Seconds the result stays on screen before the next match (shorter at high speed)
+    float AutoNextDelay() { return 2.5f / Mathf.Min(GameSpeed, 5f); }
+
+    bool autoNextStarted = false;   // so the next match is only loaded once
+
+    // AI vs AI with "Auto next match": a short pause on the result, then a brand new random map.
+    // Called every frame while the match is over.
     void UpdateAutoNextMatch()
     {
-        if (mode != GameMode.AiVsAi || !autoNextMatch || gameOverTime < 0f) return;
-        if (Time.unscaledTime - gameOverTime >= 2.5f / Mathf.Min(GameSpeed, 5f)) PressNewMap();
+        if (autoNextStarted || mode != GameMode.AiVsAi || !autoNextMatch) return;
+        if (gameOverTime < 0f) gameOverTime = Time.unscaledTime;    // ticked after the match ended: count from now
+        if (Time.unscaledTime - gameOverTime >= AutoNextDelay())
+        {
+            autoNextStarted = true;
+            PressNewMap();
+        }
     }
 
     // ---------- Main menu ----------
@@ -2193,7 +2251,7 @@ public partial class GameManager : MonoBehaviour
         GUI.DrawTexture(new Rect(0, 0, SW, SH), menuBackground);
 
         float cx = SW / 2f;
-        float y = SH * 0.18f;
+        float y = SH * 0.12f;   // high enough that every menu button fits on a 16:9 screen
         GUI.Label(new Rect(0, y, SW, 90), gameTitle, titleStyle);
         y += 90;
         GUI.Label(new Rect(cx - 250, y, 500, 24), "A turn-based hex strategy game", menuTextStyle);
@@ -2218,11 +2276,17 @@ public partial class GameManager : MonoBehaviour
             if (GUI.Button(half, "Red AI: " + redStrategy)) redStrategy = NextStrategy(redStrategy);
             y += 46;
 
+            // AI vs AI: keep playing match after match, each on a new random map
+            Rect autoRow = new Rect(SW / 2f - 160, y, 320, 36);
+            if (GUI.Button(autoRow, "Auto next match: " + (autoNextMatch ? "ON" : "OFF"))) autoNextMatch = !autoNextMatch;
+            y += 46;
+
             if (GUI.Button(MenuRow(ref y), "Back", menuButtonStyle)) menuPickMode = false;
             GUI.Label(new Rect(cx - 260, y, 520, 80),
                 "Single Player: you are Blue, the computer is Red.\n" +
                 "AI vs AI: the computer plays both sides and every result is saved to the CSV.\n" +
-                "Blue AI is used in AI vs AI (and after you press Play in a game).", menuTextStyle);
+                "Blue AI is used in AI vs AI (and after you press Play in a game).\n" +
+                "Auto next match (AI vs AI): a new random map starts by itself after each match.", menuTextStyle);
             y += 60;
         }
 

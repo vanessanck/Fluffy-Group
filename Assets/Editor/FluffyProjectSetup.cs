@@ -19,12 +19,20 @@ public class FluffyProjectSetup : IPreprocessBuildWithReport
 
     static FluffyProjectSetup()
     {
+        // Editor Play mode only keeps running in the background when this Player Setting is on,
+        // so make sure it is on every time you press Play
+        EditorApplication.playModeStateChanged += state =>
+        {
+            if (state == PlayModeStateChange.ExitingEditMode) EnsureRunInBackground();
+        };
+
         // Wait until Unity has finished loading/importing before touching assets
         EditorApplication.delayCall += () =>
         {
             if (EditorApplication.isPlayingOrWillChangePlaymode) return;
             EnsureMaterial();
             EnsureSceneInBuild();
+            EnsureRunInBackground();
         };
     }
 
@@ -34,6 +42,7 @@ public class FluffyProjectSetup : IPreprocessBuildWithReport
     {
         EnsureMaterial();
         EnsureSceneInBuild();
+        EnsureRunInBackground();
         Report(report.summary.platform);
     }
 
@@ -42,7 +51,17 @@ public class FluffyProjectSetup : IPreprocessBuildWithReport
     {
         EnsureMaterial();
         EnsureSceneInBuild();
+        EnsureRunInBackground();
         Report(EditorUserBuildSettings.activeBuildTarget);
+    }
+
+    // Player Settings > Resolution and Presentation > Run In Background: the built game keeps playing
+    // (AI vs AI, auto next match) when you Alt+Tab / Cmd+Tab to another window.
+    static void EnsureRunInBackground()
+    {
+        if (PlayerSettings.runInBackground) return;
+        PlayerSettings.runInBackground = true;
+        Debug.Log("Fluffy War: turned on Player Settings > Run In Background (the game keeps running after Alt+Tab).");
     }
 
     // The tiles, warriors and buildings all use this material. Unity always packs files in a
@@ -90,6 +109,7 @@ public class FluffyProjectSetup : IPreprocessBuildWithReport
         string msg = "Fluffy War setup check\n" +
                      "  This computer: " + os + "   Building for: " + target + "   Scripting backend: " + backend + "\n" +
                      "  HexMaterial: " + (AssetDatabase.LoadAssetAtPath<Material>(MaterialPath) != null ? "OK" : "MISSING") +
+                     "   Run in background: " + (PlayerSettings.runInBackground ? "OK" : "OFF") +
                      "   Scene in build list: " + (EditorBuildSettings.scenes.Any(s => s.path == ScenePath && s.enabled) ? "OK" : "MISSING") + "\n" +
                      "  Mac build support installed: " + (macOk ? "yes" : "NO (Unity Hub > Installs > Add modules > Mac Build Support (Mono))") + "\n" +
                      "  Windows build support installed: " + (winOk ? "yes" : "NO (Unity Hub > Installs > Add modules > Windows Build Support (Mono))");

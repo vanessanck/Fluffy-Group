@@ -10,6 +10,8 @@ using System.Linq;
 //                    Well for water, Lumber Camp, Mine Quarry, House when full, Outposts toward resources
 //                    it doesn't have, town upgrade, Barracks, Transmutation Lab, Warehouse), then trains
 //                    warriors if it can feed them, then promotes.
+//                    Tech path (AiTech): from the plan's techRound it collects Mana, upgrades the town,
+//                    builds the Transmutation Lab and Mana Sanctums, and promotes every warrior it can.
 //   Move phase     - splits its warriors into GATHERERS (stand on resource tiles it needs and collect
 //                    them at Upkeep), DEFENDERS (when enemies come near the capital) and the ARMY.
 //                    The army waits at a rally point until it is strong enough, then attacks together.
@@ -45,6 +47,7 @@ public partial class GameManager
         public int forceAttackRound;    // after this round attack with what we have
         public int upgradeAfterBuildings;
         public int barracksRound;
+        public int techRound;           // from this round: collect Mana, upgrade the town, build the Lab, promote
         public float[] mix;             // wanted share of Squire, Hunter, Scout, Rider
     }
 
@@ -55,17 +58,17 @@ public partial class GameManager
             case AiStrategy.Aggressive:
                 return new AiPlan { gathererShare = 0.2f, baseArmy = 5, armyGrowEvery = 2, minAttackers = 3,
                                     attackRatio = 0.9f, earliestAttack = 4, forceAttackRound = 18,
-                                    upgradeAfterBuildings = 5, barracksRound = 3,
+                                    upgradeAfterBuildings = 5, barracksRound = 3, techRound = 8,
                                     mix = new[] { 2f, 2f, 1f, 4f } };
             case AiStrategy.Economic:
                 return new AiPlan { gathererShare = 0.5f, baseArmy = 3, armyGrowEvery = 4, minAttackers = 7,
                                     attackRatio = 1.5f, earliestAttack = 15, forceAttackRound = 50,
-                                    upgradeAfterBuildings = 2, barracksRound = 20,
+                                    upgradeAfterBuildings = 2, barracksRound = 20, techRound = 3,
                                     mix = new[] { 3f, 3f, 2f, 1f } };
             default:
                 return new AiPlan { gathererShare = 0.35f, baseArmy = 4, armyGrowEvery = 3, minAttackers = 5,
                                     attackRatio = 1.25f, earliestAttack = 8, forceAttackRound = 35,
-                                    upgradeAfterBuildings = 3, barracksRound = 10,
+                                    upgradeAfterBuildings = 3, barracksRound = 10, techRound = 5,
                                     mix = new[] { 3f, 3f, 1f, 2f } };
         }
     }
@@ -81,6 +84,8 @@ public partial class GameManager
         public HexTile rally;
         public int totalGathered;                  // for the research CSV
         public string lastAction = "";
+        public bool savingForTech;                 // keeping Wood/Mineral/Mana for the town upgrade or the Lab
+        public Cost techGoal;                      // the price being saved for (null = nothing)
     }
 
     Dictionary<string, AiBrain> brains = new Dictionary<string, AiBrain>();
@@ -161,7 +166,8 @@ public partial class GameManager
             case ResourceType.Wood: target = 45; break;
             case ResourceType.Mineral: target = 40; break;
             case ResourceType.Water: target = 30; break;
-            default: target = (s.townLevel >= 2 || HasBuilding(owner, "Transmutation Lab")) ? 20 : 3; break;
+            // Mana pays for the town upgrade (5), the Lab (5) and every promotion (5-6), so the AI always wants some
+            default: target = HasBuilding(owner, "Transmutation Lab") ? 24 : 14; break;
         }
         float need = Mathf.Clamp((target - s.stock.Get(r)) / (float)target, 0.1f, 1f);
         if (net.Get(r) <= 0) need += 0.5f;
@@ -169,6 +175,7 @@ public partial class GameManager
         if (r == ResourceType.Wheat && NeedsPeople(owner)) need += 0.6f;   // Wheat surplus grows citizens
         if (r == ResourceType.Meat && meatCountsAsFood && FoodNet(owner) < 0) need += 0.3f;
         if (r == ResourceType.Water && s.dehydrated) need += 0.5f;
+        if (TechShort(owner, r) > 0) need += r == ResourceType.Mana ? 1.2f : 0.6f;   // saving for town upgrade / Lab
         return need;
     }
 
@@ -223,6 +230,10 @@ public partial class GameManager
         }
         if (threatened) return;   // save the rest for warriors
 
+        // 2b. Tech: Mana -> town Level 2 -> Transmutation Lab -> Mana Sanctums for promotions
+        if (AiTech(owner)) return;
+        if (brain.savingForTech) return;   // only the must-haves above until the upgrade / Lab is paid for
+
         // 3. Room for more people
         if (PopUsed(owner) >= PopCap(owner) - 1 && TryBuild(owner, "House")) return;
 
@@ -233,7 +244,7 @@ public partial class GameManager
         // From here on the buildings are extras: while the army is too small, keep enough to train warriors
         bool saving = UnitCount(owner) < WantedArmy(owner);
 
-        // 5. Town Level 2 once the basics stand
+        // 5. Town Level 2 once the basics stand (also done by AiTech from techRound on)
         if (myBuildings >= plan.upgradeAfterBuildings && (!saving || KeepsReserve(owner, upgradeCost))
             && UpgradeTown(owner)) { Did(owner, "upgraded the town"); return; }
 
@@ -241,7 +252,7 @@ public partial class GameManager
         if (turn >= plan.barracksRound && !HasBuilding(owner, "Barracks") && TryBuild(owner, "Barracks", saving)) return;
 
         // 7. Promotions: Transmutation Lab, then Mana for it
-        if (s.townLevel >= 2 && (brain.strategy != AiStrategy.Aggressive || turn >= 20))
+        if (s.townLevel >= 2 && turn >= plan.techRound)
         {
             if (TryBuild(owner, "Transmutation Lab", saving)) return;
             if (net.mana <= 0 && TryBuild(owner, "Mana Sanctum", saving)) return;
@@ -269,6 +280,64 @@ public partial class GameManager
 
         // 11. A spare Barracks for the aggressive plan
         if (brain.strategy == AiStrategy.Aggressive && BarracksTiles(owner).Count < 2) TryBuild(owner, "Barracks", saving);
+    }
+
+    // The tech path every plan follows from plan.techRound: get Mana, upgrade the town to Level 2,
+    // build the Transmutation Lab, then keep Mana coming for promotions.
+    // Returns true when it used this turn's build. Sets brain.savingForTech while it is saving up.
+    bool AiTech(string owner)
+    {
+        AiBrain brain = BrainFor(owner);
+        Side s = sides[owner];
+        brain.savingForTech = false;
+        brain.techGoal = null;
+        if (turn < brain.plan.techRound) return false;
+
+        Cost goal = null;
+        if (s.townLevel < 2)
+        {
+            if (UpgradeTown(owner)) { Did(owner, "upgraded the town"); return true; }
+            goal = upgradeCost;
+        }
+        else if (!HasBuilding(owner, "Transmutation Lab"))
+        {
+            if (TryBuild(owner, "Transmutation Lab")) return true;
+            BuildingType lab = FindType("Transmutation Lab");
+            goal = lab != null ? lab.cost : null;
+        }
+
+        // Mana income: a Mana Sanctum on a Mana tile, or an Outpost toward one
+        Cost net = NetIncome(owner);
+        int manaSanctums = CountBuildings(owner, "Mana Sanctum");
+        bool wantSanctum = net.mana <= 0 || (goal == null && manaSanctums < 2);
+        if (wantSanctum)
+        {
+            if (TryBuild(owner, "Mana Sanctum")) return true;
+            if (manaSanctums == 0 && s.stock.mana < 5 && CountBuildings(owner, "Outpost") < 3 + turn / 10
+                && TryOutpostToward(owner, ResourceType.Mana)) return true;
+        }
+
+        if (goal == null) return false;
+
+        // Still saving: don't spend what the upgrade / Lab needs on extras or extra warriors,
+        // and build income for whatever is short (Need() also sends gatherers there)
+        brain.techGoal = goal;
+        brain.savingForTech = s.stock.wood < goal.wood || s.stock.mineral < goal.mineral || s.stock.mana < goal.mana;
+        if (s.stock.mineral < goal.mineral && net.mineral < 4)
+        {
+            if (TryBuild(owner, "Mine Quarry")) return true;
+            if (CountBuildings(owner, "Outpost") < 3 + turn / 10 && TryOutpostToward(owner, ResourceType.Mineral)) return true;
+        }
+        if (s.stock.wood < goal.wood && net.wood < 5 && TryBuild(owner, "Lumber Camp")) return true;
+        return false;
+    }
+
+    // How much of the upgrade / Lab price is still missing for this resource (0 = none)
+    int TechShort(string owner, ResourceType r)
+    {
+        AiBrain b = BrainFor(owner);
+        if (!b.savingForTech || b.techGoal == null) return 0;
+        return Mathf.Max(0, b.techGoal.Get(r) - sides[owner].stock.Get(r));
     }
 
     static string ExtractorFor(ResourceType r)
@@ -364,6 +433,9 @@ public partial class GameManager
         AiPlan plan = brain.plan;
         int wanted = WantedArmy(owner);
 
+        // Saving for the town upgrade / Lab: keep only a small army until it is paid for
+        if (!urgent && brain.savingForTech) wanted = Mathf.Min(wanted, plan.baseArmy + 1);
+
         int tries = TrainingTiles(owner).Count;
         for (int i = 0; i < tries; i++)
         {
@@ -400,16 +472,18 @@ public partial class GameManager
         return best;
     }
 
-    // Promote warriors resting at home (not the ones out gathering, not while the army is marching)
+    // Promote every Tier 1 warrior standing on our own land (army, defenders and gatherers).
+    // Army warriors first, so the fighters get stronger before the gatherers.
+    // While attacking, only warriors that haven't left home yet promote (CanPromote needs our own tile).
     void AiPromote(string owner)
     {
         AiBrain brain = BrainFor(owner);
-        foreach (Unit u in new List<Unit>(units))
+        List<Unit> order = units.Where(u => u.owner == owner)
+                                .OrderBy(u => brain.roles.ContainsKey(u) && brain.roles[u] == "Gather")
+                                .ThenByDescending(u => u.type.attack).ToList();
+        foreach (Unit u in order)
         {
-            if (u.owner != owner || !CanPromote(u)) continue;
-            string role;
-            if (brain.roles.TryGetValue(u, out role) && role == "Gather") continue;
-            if (brain.state == "Attack") continue;
+            if (!CanPromote(u)) continue;
             if (Promote(u)) Did(owner, "promoted to " + u.type.name);
         }
     }

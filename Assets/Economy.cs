@@ -139,7 +139,7 @@ public static class BuildingCatalog
             new BuildingType { name = "Warehouse", cost = new Cost { wood = 15, mineral = 10 }, storage = 50,
                 shape = PrimitiveType.Cube, size = new Vector3(0.5f, 0.25f, 0.35f), color = new Color(0.75f, 0.6f, 0.4f) },
             new BuildingType { name = "Outpost", cost = new Cost { wood = 20, mineral = 10 }, wheatUpkeep = 1,
-                claimRadius = 1, borderOnly = true,
+                claimRadius = 2, borderOnly = true,   // claims every free tile up to 2 away (was 1)
                 shape = PrimitiveType.Cylinder, size = new Vector3(0.25f, 0.35f, 0.25f), color = Color.white },
             // Barracks: an extra place to train Tier 1 warriors (the capital can train too)
             new BuildingType { name = "Barracks", cost = new Cost { wood = 20, mineral = 10 },
