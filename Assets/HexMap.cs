@@ -90,6 +90,8 @@ public class HexMap : MonoBehaviour
     [Tooltip("Each side's starting territory must hold Wheat or Meat, Wood, Water and Mineral. " +
              "On: a missing one is added to the best-fitting free tile in that territory. Off: the map is rejected instead.")]
     public bool addMissingStartResources = true;
+    [Tooltip("Each capital gets a Mana tile at most this many tiles away (added if missing). 0 = off.")]
+    public int manaStartDistance = 4;
 
     [Header("Towns")]
     public int townRadius = 2;
@@ -249,6 +251,50 @@ public class HexMap : MonoBehaviour
                   ", capitals " + startDistance + " apart" +
                   ", start resources added " + startResourcesAdded +
                   (exportCsv ? "   CSV saved in: " + ExportFolder() : ""));
+    }
+
+    // ---------- Research tool: pass carve sweep ----------
+    // Right-click the HexMap component (or its 3-dot menu) > "Research: Pass Carve Sweep".
+    // Works with the game stopped. For each pass carve chance it generates sweepMapsPerValue maps
+    // (one attempt each, Randomize Parameters forced off) and adds one row per map to
+    // Map_Generation_Log.csv. Nothing in the scene changes; your Inspector values are restored after.
+    [Header("Research: pass carve sweep")]
+    public float[] sweepPassCarveValues = { 0f, 0.25f, 0.5f, 0.75f, 1f };
+    public int sweepMapsPerValue = 20;
+
+    [ContextMenu("Research: Pass Carve Sweep")]
+    public void RunPassCarveSweep()
+    {
+        float oldChance = passCarveChance;
+        bool oldRandomize = randomizeParameters;
+        int oldSeed = seed;
+        bool oldExport = exportCsv;
+        int count = 0;
+        try
+        {
+            exportCsv = true;
+            randomizeParameters = false;
+            foreach (float v in sweepPassCarveValues)
+            {
+                passCarveChance = Mathf.Clamp01(v);
+                for (int i = 0; i < sweepMapsPerValue; i++)
+                {
+                    seed = NewRandomSeed();
+                    string result = GenerateAndValidate(seed);
+                    ExportAttempt(1, seed, result);
+                    count++;
+                }
+            }
+            Debug.Log("Pass carve sweep done: " + count + " maps added to " +
+                      Path.Combine(ExportFolder(), "Map_Generation_Log.csv"));
+        }
+        finally
+        {
+            passCarveChance = oldChance;
+            randomizeParameters = oldRandomize;
+            seed = oldSeed;
+            exportCsv = oldExport;
+        }
     }
 
     // Each attempt gets its own seed, made from the base seed and the attempt number.
@@ -756,7 +802,33 @@ public class HexMap : MonoBehaviour
             best.resource = bestRes;
             startResourcesAdded++;
         }
+        EnsureManaNearby(capital, rng);
         return true;
+    }
+
+    // Mana pays for the town upgrade, the Transmutation Lab and promotions, so every side needs a
+    // Mana tile it can reach. If there is none within manaStartDistance of the capital, one is put
+    // on the best free tile 2..manaStartDistance away (not inside the start land, so a side still has
+    // to walk a warrior there or build an Outpost to get it).
+    void EnsureManaNearby(HexTile capital, System.Random rng)
+    {
+        if (manaStartDistance <= 0) return;
+        if (tiles.Exists(t => t.resource == ResourceType.Mana && Distance(t, capital) <= manaStartDistance)) return;
+
+        HexTile best = null;
+        float bestScore = float.MinValue;
+        int manaIndex = System.Array.IndexOf(allResources, ResourceType.Mana);
+        foreach (HexTile t in tiles)
+        {
+            int d = Distance(t, capital);
+            if (d < 2 || d > manaStartDistance) continue;
+            if (t.town != "" || t.resource != ResourceType.None || !IsWalkable(t.type) || !continent.Contains(t)) continue;
+            float score = SpawnTable()[t.type][manaIndex] * 10f + d * 0.3f + (float)rng.NextDouble() * 0.1f;
+            if (score > bestScore) { bestScore = score; best = t; }
+        }
+        if (best == null) return;
+        best.resource = ResourceType.Mana;
+        startResourcesAdded++;
     }
 
     // True when the territory has Wheat or Meat, Wood, Water and Mineral
